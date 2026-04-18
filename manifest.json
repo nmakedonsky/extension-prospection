@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Prospection",
-  "version": "0.4.8",
+  "version": "0.5.3",
   "description": "LinkedIn Jobs — badges SS2I / Client (Gemini), cache Supabase, HubSpot en option.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
@@ -34,6 +34,7 @@
         "content/jobs/company-from-card.js",
         "content/jobs/collect-cards.js",
         "content/jobs/diagnostic.js",
+        "content/jobs/perf-metrics.js",
         "content/jobs/scan.js",
         "content/jobs/badges-classify.js",
         "content/jobs/heartbeat.js",

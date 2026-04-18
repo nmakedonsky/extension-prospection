@@ -79,6 +79,7 @@ let classifyDebounce = null;
 async function runClassificationPass() {
   if (!isClassificationTargetPage()) return;
 
+  const passStarted = performance.now();
   const cards = collectJobCards();
   const todo = [];
   for (const card of cards) {
@@ -104,6 +105,11 @@ async function runClassificationPass() {
   }
   const n = Math.min(concurrency, Math.max(1, todo.length));
   await Promise.all(Array.from({ length: n }, () => worker()));
+
+  const passMs = Math.round(performance.now() - passStarted);
+  if (typeof pnRecordClassificationPass === 'function') {
+    pnRecordClassificationPass(passMs, todo.length);
+  }
 }
 
 function scheduleClassification() {

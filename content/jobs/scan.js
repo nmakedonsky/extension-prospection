@@ -1,7 +1,13 @@
 /** Payload télémétrie + marqueurs CSS de chemin. */
 
 function buildScanPayload() {
+  pnSyncPathForPerf();
+
+  const tCollect0 = performance.now();
   const cards = collectJobCards();
+  const collectMs = Math.round(performance.now() - tCollect0);
+
+  const tNames0 = performance.now();
   const companies = [];
   const seenNames = new Set();
   for (const card of cards) {
@@ -11,11 +17,21 @@ function buildScanPayload() {
     seenNames.add(name);
     companies.push(name);
   }
+  const extractCompaniesMs = Math.round(performance.now() - tNames0);
+
+  const timing = pnNotifyScanStep(cards.length, collectMs, extractCompaniesMs);
+  const classifyExtra = pnConsumeLastClassificationForPayload();
+
   return {
     cardCount: cards.length,
     companyCount: companies.length,
     sampleCompanies: companies.slice(0, 8),
-    pageKind: isJobsCollectionsPath() ? 'collections' : 'search-results'
+    pageKind: isJobsCollectionsPath() ? 'collections' : 'search-results',
+    collectMs: timing.collectMs,
+    extractCompaniesMs: timing.extractCompaniesMs,
+    msToFirstNonzeroCards: timing.msToFirstNonzeroCards,
+    msSincePathSegment: timing.msSincePathSegment,
+    ...(classifyExtra || {})
   };
 }
 

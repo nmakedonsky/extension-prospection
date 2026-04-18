@@ -95,6 +95,124 @@ function findCompanyUrlFromJobDetailsPane(wrapper) {
   return null;
 }
 
+/** Rejette GIF 1×1 / fantômes LinkedIn (pas le vrai logo entreprise). */
+function pnIsGhostOrSpacerImgUrl(u) {
+  const s = pnTrim(u).toLowerCase();
+  if (!s) return true;
+  if (s.includes('ghost') && s.includes('licdn')) return true;
+  if (/pixel\.gif|spacer|blank\.(gif|png)/i.test(s)) return true;
+  return false;
+}
+
+/**
+ * URL affichée / lazy-load : souvent data-delayed-url avant que src soit le CDN réel.
+ * Ex. media.licdn.com/.../company-logo_100_100/.../illicado_logo
+ */
+function resolveLogoUrlFromImg(img) {
+  if (!img || img.nodeName !== 'IMG') return null;
+  const attrs = [
+    img.getAttribute('data-delayed-url'),
+    img.getAttribute('data-delayed-url-shimmer'),
+    img.getAttribute('data-src'),
+    img.getAttribute('src'),
+    typeof img.src === 'string' ? img.src : ''
+  ];
+  for (const c of attrs) {
+    const u = pnTrim(c);
+    if (!u || u.startsWith('data:') || u.startsWith('blob:')) continue;
+    if (!/^https?:\/\//i.test(u)) continue;
+    if (pnIsGhostOrSpacerImgUrl(u)) continue;
+    return u;
+  }
+  const srcset = img.getAttribute('srcset');
+  if (srcset) {
+    const first = srcset
+      .split(',')
+      .map((x) => x.trim().split(/\s+/)[0])
+      .find((x) => x && /^https?:\/\//i.test(x));
+    if (first && !pnIsGhostOrSpacerImgUrl(first)) return first;
+  }
+  return null;
+}
+
+function pnIsProbableCompanyLogoCdnUrl(u) {
+  const s = pnTrim(u);
+  if (!/^https?:\/\//i.test(s)) return false;
+  if (/media\.licdn\.com/i.test(s) && /(dms\/image|company-logo)/i.test(s)) return true;
+  return false;
+}
+
+/**
+ * @returns {{ url: string|null, img: HTMLImageElement|null }}
+ */
+function findLogoInRoot(root) {
+  if (!root?.querySelectorAll) return { url: null, img: null };
+  const selectors = [
+    'a[href*="/company/"] img',
+    'img[data-delayed-url*="media.licdn.com"]',
+    'img[src*="media.licdn.com"]',
+    'img[class*="EntityPhoto"]',
+    'img[alt*="Logo"]',
+    'img[alt*="logo"]',
+    '[class*="entity-lockup"] img',
+    '[class*="EntityLockup"] img',
+    '[class*="jobs-company"] img'
+  ];
+  const seen = new Set();
+  for (const sel of selectors) {
+    try {
+      for (const img of root.querySelectorAll(sel)) {
+        if (seen.has(img)) continue;
+        seen.add(img);
+        const url = resolveLogoUrlFromImg(img);
+        if (url && pnIsProbableCompanyLogoCdnUrl(url)) return { url, img };
+      }
+    } catch (_) {}
+  }
+  for (const img of root.querySelectorAll('img')) {
+    if (seen.has(img)) continue;
+    const url = resolveLogoUrlFromImg(img);
+    if (url && pnIsProbableCompanyLogoCdnUrl(url)) return { url, img };
+  }
+  return { url: null, img: null };
+}
+
+/**
+ * Logo souvent dans le panneau détail (droite) alors que la liste n’a qu’un placeholder.
+ */
+function findLogoFromJobDetailsPane() {
+  const detailSelectors = [
+    '[componentkey*="JobDetails"]',
+    '.jobs-search-two-pane__details',
+    '.scaffold-layout__detail',
+    '.jobs-details',
+    '[class*="jobs-search__job-details"]',
+    '.jobs-unified-top-card'
+  ];
+  for (const sel of detailSelectors) {
+    try {
+      for (const root of document.querySelectorAll(sel)) {
+        const hit = findLogoInRoot(root);
+        if (hit.url) return hit;
+      }
+    } catch (_) {}
+  }
+  const vw = window.innerWidth || 1200;
+  const split = vw * 0.42;
+  try {
+    for (const img of document.querySelectorAll(
+      'img[data-delayed-url*="media.licdn.com"], img[src*="media.licdn.com"]'
+    )) {
+      const r = img.getBoundingClientRect?.();
+      if (!r || r.width < 2 || r.height < 2) continue;
+      if (r.left < split) continue;
+      const url = resolveLogoUrlFromImg(img);
+      if (url && pnIsProbableCompanyLogoCdnUrl(url)) return { url, img };
+    }
+  } catch (_) {}
+  return { url: null, img: null };
+}
+
 /** Heuristique lieu / métadonnées sur la carte. */
 function extractJobLocationHint(wrapper) {
   if (!wrapper?.querySelector) return '';
@@ -118,7 +236,10 @@ function extractJobLocationHint(wrapper) {
  */
 function buildCompanyMatchContextSync(wrapper, companyName) {
   const name = pnTrim(companyName);
-  const logoImg = wrapper?.querySelector?.('img[alt*="Logo"], img[class*="EntityPhoto"]');
+  let logoHit = findLogoInRoot(wrapper);
+  if (!logoHit.url) {
+    logoHit = findLogoFromJobDetailsPane();
+  }
   let companyLinkedinUrl =
     findCompanyUrlInRoot(wrapper) ||
     findCompanyUrlFromJobDetailsPane(wrapper);
@@ -130,8 +251,12 @@ function buildCompanyMatchContextSync(wrapper, companyName) {
   const ctx = {
     matchContextVersion: MATCH_CONTEXT_VERSION,
     companyName: name,
-    logoUrl: logoImg?.src ? String(logoImg.src).trim() : null,
-    logoAlt: logoImg?.alt ? String(logoImg.alt).trim() : name ? `Logo de ${name}` : null,
+    logoUrl: logoHit.url ? String(logoHit.url).trim() : null,
+    logoAlt: logoHit.img?.alt
+      ? String(logoHit.img.alt).trim()
+      : name
+        ? `Logo de ${name}`
+        : null,
     companyLinkedinUrl,
     jobTitle: pnTrim(jobInfo.jobTitle),
     jobUrl: pnTrim(jobInfo.jobUrl),

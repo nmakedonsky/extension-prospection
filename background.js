@@ -110,6 +110,33 @@ async function getGeminiApiKey() {
 }
 
 /**
+ * Interprète la sortie Gemini sans utiliser includes('client'), qui fausse la classe
+ * dès qu'une phrase contient le mot « client » (ex. « clients finaux », « relation client »).
+ * @param {string} raw
+ * @returns {'Client'|'SS2I'|null}
+ */
+function parseGeminiClassificationLabel(raw) {
+  const lines = String(raw || '')
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((s) =>
+      s
+        .trim()
+        .replace(/^[-*•\d.\s]+/, '')
+        .replace(/[*_`]/g, '')
+        .trim()
+    )
+    .filter((s) => s.length > 0);
+  for (const cleaned of lines) {
+    const m = /\b(SS2I|Client)\b/i.exec(cleaned);
+    if (m) {
+      return m[1].toLowerCase() === 'client' ? 'Client' : 'SS2I';
+    }
+  }
+  return null;
+}
+
+/**
  * @param {string} companyName
  * @returns {Promise<'Client'|'SS2I'>}
  */
@@ -119,16 +146,20 @@ async function classifyCompanyWithGemini(companyName) {
     throw new Error('Clé API Gemini non configurée.');
   }
 
-  const prompt = `Tu es un expert en classification d'entreprises françaises.
-Pour l'entreprise donnée, réponds UNIQUEMENT par un des deux mots suivants :
-- SS2I : si c'est une ESN, SS2I, cabinet de conseil, ou société de services
-- Client : si c'est une entreprise client finale (industrie, banque, retail, etc.)
+  const prompt = `Tu classifie les entreprises pour de la prospection commerciale (France / international).
+Réponds par UN SEUL MOT, sans phrase ni ponctuation : exactement SS2I ou Client.
 
-Entreprise : "${companyName}"`;
+Définitions :
+- SS2I : ESN, SSII, société de services du numérique, intégrateur, prestataire informatique, régie tech, cabinet de conseil ou de services IT (conseil en technologies, transformation digitale pour le compte de donneurs d’ordres). Si le cœur de métier est la prestation intellectuelle / la régie / le service IT pour tiers → SS2I.
+- Client : entreprise dont l’activité principale n’est pas la prestation IT ou le conseil pour compte de tiers (industrie manufacturière, retail, banque, assurance, santé, énergie, média, etc.). Éditeur logiciel « produit » ou scale-up SaaS sans activité type ESN peut être Client ; en cas de doute entre ESN / conseil IT et autre, choisir SS2I si la description ressemble à une société de services ou de conseil IT.
+
+Attention aux homonymes de raison sociale : privilégie le profil le plus probable pour une offre d’emploi tech / conseil (souvent SS2I).
+
+Entreprise : "${String(companyName || '').replace(/"/g, '\\"')}"`;
 
   const requestBody = {
     contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0, maxOutputTokens: 20 }
+    generationConfig: { temperature: 0, maxOutputTokens: 16 }
   };
 
   let lastError = null;
@@ -151,11 +182,8 @@ Entreprise : "${companyName}"`;
         lastError = new Error(`Réponse vide (${model})`);
         continue;
       }
-      const normalized = out.trim().toLowerCase();
-      if (normalized.includes('client')) return 'Client';
-      if (normalized.includes('ss2i') || normalized.includes('esn') || normalized.includes('consulting')) {
-        return 'SS2I';
-      }
+      const parsed = parseGeminiClassificationLabel(out);
+      if (parsed) return parsed;
       return 'SS2I';
     } catch (err) {
       lastError = err;

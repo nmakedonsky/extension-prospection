@@ -17,3 +17,12 @@ setInterval(() => {
     syncFinancialDockVisibility();
   }
 }, 600);
+
+/** Offre déjà sélectionnée dans l’URL (fond gris) : remplir le dock dès que la carte est classée, sans reclic. */
+setInterval(() => {
+  try {
+    if (typeof trySyncFinancialPanelToUrlSelectedJob === 'function') {
+      trySyncFinancialPanelToUrlSelectedJob();
+    }
+  } catch (_) {}
+}, 450);
