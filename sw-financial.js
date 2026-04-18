@@ -55,6 +55,15 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
 
   const cached = await swGetFinancialCache(companyName);
   if (!forceRefresh && cached?.updatedAt && Date.now() - cached.updatedAt < SW_FINANCIAL_CACHE_TTL_MS) {
+    let companySummary = cached.companySummary ?? null;
+    if (!companySummary) {
+      companySummary = await swEnsureCompanySummaryCached(
+        companyName,
+        companyContext,
+        geminiApiKey,
+        cached
+      );
+    }
     const u = swAttachScoreBreakdownIfNeeded(cached.unified || null);
     return {
       data: cached.data,
@@ -65,8 +74,50 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
       score: u?.score ?? null,
       confidence: u?.confidence ?? null,
       sources: u?.sources || [],
-      partial: !!u?.partial
+      partial: !!u?.partial,
+      companySummary: companySummary || null
     };
+  }
+
+  if (!forceRefresh) {
+    const supabaseFinancial = await swGetFinancialFromSupabase(companyName);
+    const payload = supabaseFinancial?.fmp_payload;
+    const updatedAtIso = supabaseFinancial?.fmp_updated_at;
+    const updatedAt = updatedAtIso ? new Date(updatedAtIso).getTime() : null;
+    if (payload?.data && updatedAt && Date.now() - updatedAt < SW_FINANCIAL_CACHE_TTL_MS) {
+      let companySummary = payload.companySummary ?? null;
+      if (!companySummary) {
+        companySummary = await swEnsureCompanySummaryCached(
+          companyName,
+          companyContext,
+          geminiApiKey,
+          payload
+        );
+      }
+      await swSetFinancialCache(companyName, { ...payload, companySummary: companySummary || null });
+      const rawUnified = supabaseFinancial?.unified_payload || payload.unified || null;
+      const u = swAttachScoreBreakdownIfNeeded(rawUnified);
+      return {
+        data: payload.data,
+        fromCache: true,
+        symbol: null,
+        supabase: { ok: true, mode: 'read' },
+        unified: u,
+        mode: supabaseFinancial?.mode || u?.mode || null,
+        score: supabaseFinancial?.score ?? u?.score ?? null,
+        confidence: supabaseFinancial?.confidence ?? u?.confidence ?? null,
+        sources: u?.sources || payload.unified?.sources || [],
+        partial: !!(supabaseFinancial?.unified_payload?.partial ?? u?.partial ?? payload.unified?.partial),
+        companySummary: companySummary || null,
+        llm: {
+          attempted: !!payload?.raw?.debug?.llmAttempted,
+          articlesCount: 0,
+          extracted: !!payload?.raw?.llmExtraction,
+          error: payload?.raw?.debug?.llmError || null,
+          pipeline: payload?.raw?.debug?.pipeline || null
+        }
+      };
+    }
   }
 
   const pipeline = await self.financialPipeline.runAdaptiveFinancialPipeline(
@@ -90,11 +141,27 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
     revenue_per_employee: unified.financials?.revenue_per_employee ?? null
   };
 
+  const identificationNotes =
+    (pipeline?.raw?.llm && pipeline.raw.llm.identification_notes) || '';
+
+  let companySummary = null;
+  try {
+    companySummary = await swFetchCompanySummary(
+      companyName,
+      companyContext,
+      geminiApiKey,
+      typeof identificationNotes === 'string' ? identificationNotes : ''
+    );
+  } catch (e) {
+    console.warn('[Prospection SW] Résumé entreprise (pipeline):', e?.message || e);
+  }
+
   const entry = {
     data: mapped,
     unified,
     updatedAt: Date.now(),
     symbol: null,
+    companySummary: companySummary || null,
     raw: {
       companyContext: pipeline?.raw?.companyContext || null,
       llmExtraction: pipeline?.raw?.llm || null,
@@ -103,16 +170,22 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
   };
   await swSetFinancialCache(companyName, entry);
 
+  const supabaseWrite = await swUpsertFinancialToSupabase(companyName, entry);
+  if (!supabaseWrite.ok) {
+    console.warn('[Prospection SW] Supabase financial write KO:', supabaseWrite.error);
+  }
+
   return {
     data: mapped,
     fromCache: false,
     symbol: null,
-    supabase: { ok: true, mode: 'local' },
+    supabase: supabaseWrite,
     mode: unified.mode,
     score: unified.score,
     confidence: unified.confidence,
     sources: unified.sources,
     partial: !!unified.partial,
+    companySummary: companySummary || null,
     reason: unified.partial ? 'Données incomplètes ou proxy.' : null,
     llm: {
       attempted: !!pipeline?.raw?.debug?.llmAttempted,

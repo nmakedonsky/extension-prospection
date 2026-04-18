@@ -66,7 +66,7 @@ html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[comp
 
 /* Panneau gauche financier — décale #root (Voyager) */
 :root {
-  --lph-financial-dock-width: 300px;
+  --lph-financial-dock-width: 312px;
 }
 
 html.lph-financial-dock-active #root {
@@ -131,7 +131,7 @@ html.lph-financial-dock-active body:not(:has(#root)) {
   width: 100%;
   min-width: 0;
   max-width: none;
-  padding: 12px 14px;
+  padding: 10px 10px 12px;
   background: #fff;
   border: 1px solid #e0e0e0;
   border-radius: 8px;
@@ -149,22 +149,44 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 .lph-financial-card__title {
   font-weight: 600;
   font-size: 13px;
-  margin-bottom: 6px;
-  padding-bottom: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
   border-bottom: 1px solid #eee;
   color: #0a66c2;
+  line-height: 1.25;
+}
+
+.lph-financial-card__actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.lph-financial-card__actions--solo .lph-financial-card__financial-btn {
+  flex: 1 1 100%;
+}
+
+.lph-financial-card__action-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  margin-top: 0 !important;
+  padding: 7px 8px !important;
+  font-size: 11px !important;
+  line-height: 1.2;
 }
 
 .lph-financial-card__score-row {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 10px 14px;
-  margin-bottom: 6px;
+  gap: 8px 12px;
+  margin-bottom: 4px;
 }
 
 .lph-financial-card__score {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1.15;
   margin-bottom: 0;
@@ -191,52 +213,33 @@ html.lph-financial-dock-active body:not(:has(#root)) {
   color: #6b7280;
 }
 
-.lph-financial-card__metrics-wrap {
-  margin-bottom: 4px;
+.lph-financial-card__summary {
+  font-size: 10px;
+  line-height: 1.4;
+  color: #374151;
+  margin: 0 0 8px;
+  padding: 8px 8px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
 }
 
-.lph-financial-card__metrics-panel.lph-financial-card__metrics-panel--collapsed {
+.lph-financial-card__summary[hidden] {
   display: none !important;
-  visibility: hidden !important;
-  overflow: hidden !important;
-  max-height: 0 !important;
-  margin: 0 !important;
-  padding: 0 !important;
 }
 
-.lph-financial-card__metrics-panel:not(.lph-financial-card__metrics-panel--collapsed) {
-  display: block !important;
+.lph-financial-card__metrics-wrap {
+  margin-bottom: 0;
+}
+
+.lph-financial-card__metrics-panel {
+  display: block;
+  overflow: visible;
+  max-height: none;
 }
 
 .lph-financial-card__metrics-panel .lph-financial-card__financial-status {
   margin-top: 6px;
-}
-
-.lph-financial-card__metrics-toggle {
-  display: block;
-  width: 100%;
-  margin: 0 0 8px;
-  padding: 4px 0;
-  border: none;
-  background: none;
-  font: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  color: #0a66c2;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-  pointer-events: auto;
-}
-
-.lph-financial-card__metrics-toggle:hover:not(:disabled) {
-  color: #004182;
-}
-
-.lph-financial-card__metrics-toggle:disabled,
-.lph-financial-card__metrics-toggle[hidden] {
-  display: none;
 }
 
 .lph-financial-card__score--ok {
@@ -252,20 +255,20 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 }
 
 .lph-financial-card__section-title {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   color: #6b7280;
-  padding: 10px 0 6px;
+  padding: 6px 0 4px;
   margin: 0;
   list-style: none;
   grid-column: 1 / -1;
 }
 
 .lph-financial-card__section-title:not(:first-child) {
-  margin-top: 6px;
-  padding-top: 14px;
+  margin-top: 4px;
+  padding-top: 8px;
   border-top: 1px solid #eaeaea;
 }
 
@@ -275,24 +278,40 @@ html.lph-financial-dock-active body:not(:has(#root)) {
   padding: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 12px;
+  column-gap: 10px;
+}
+
+.lph-financial-card__list--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 8px;
+  font-size: 10px;
+}
+
+.lph-financial-card--compact .lph-financial-card__label {
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.lph-financial-card--compact .lph-financial-card__value {
+  font-size: 10px;
 }
 
 .lph-financial-card__item {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 10px;
-  padding: 4px 0;
-  line-height: 1.35;
+  gap: 6px;
+  padding: 2px 0;
+  line-height: 1.3;
 }
 
 .lph-financial-card__item:not(:last-child) {
-  border-bottom: 1px solid #f5f5f5;
+  border-bottom: 1px solid #f3f3f3;
 }
 
 .lph-financial-card__label {
   flex: 1;
+  min-width: 0;
   color: #555;
 }
 
@@ -316,8 +335,8 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 }
 
 .lph-financial-card__hubspot-status {
-  margin-top: 8px;
-  font-size: 11px;
+  margin: 0 0 6px;
+  font-size: 10px;
   line-height: 1.35;
   color: #666;
 }
@@ -331,8 +350,8 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 }
 
 .lph-financial-card__financial-status {
-  margin-top: 8px;
-  font-size: 11px;
+  margin-top: 4px;
+  font-size: 10px;
   line-height: 1.35;
   color: #666;
 }
@@ -344,7 +363,7 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 .lph-financial-card__financial-btn {
   display: block;
   width: 100%;
-  margin-top: 8px;
+  margin-top: 0;
   padding: 8px 12px;
   border: none;
   border-radius: 6px;
@@ -367,7 +386,7 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 .lph-financial-card__hubspot-btn {
   display: block;
   width: 100%;
-  margin-top: 10px;
+  margin-top: 0;
   padding: 8px 12px;
   border: none;
   border-radius: 6px;

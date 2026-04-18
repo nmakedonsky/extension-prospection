@@ -8,6 +8,8 @@ importScripts(
   'llmExtractor.js',
   'financialPipeline.js',
   'financial-gemini-context.js',
+  'sw-company-summary.js',
+  'sw-supabase-financial.js',
   'sw-financial.js'
 );
 

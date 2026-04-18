@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Prospection",
-  "version": "0.4.1",
+  "version": "0.4.5",
   "description": "LinkedIn Jobs — badges SS2I / Client (Gemini), cache Supabase, HubSpot en option.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
@@ -26,7 +26,29 @@
         "https://linkedin.com/jobs/*",
         "https://*.linkedin.com/jobs/*"
       ],
-      "js": ["content/jobs-page.js", "content/financial-dock.js"],
+      "js": [
+        "content/jobs/constants.js",
+        "content/jobs/page-config.js",
+        "content/jobs/dom-deep.js",
+        "content/jobs/geometry-path.js",
+        "content/jobs/company-from-card.js",
+        "content/jobs/collect-cards.js",
+        "content/jobs/diagnostic.js",
+        "content/jobs/scan.js",
+        "content/jobs/badges-classify.js",
+        "content/jobs/heartbeat.js",
+        "content/jobs/jobs-run.js",
+        "content/financial/constants.js",
+        "content/financial/messaging.js",
+        "content/financial/path-and-eligibility.js",
+        "content/financial/company-dock.js",
+        "content/financial/dock-shell.js",
+        "content/financial/metrics-render.js",
+        "content/financial/panel-populate.js",
+        "content/financial/selection-handlers.js",
+        "content/financial/financial-run.js",
+        "content/jobs/prefetch-client-financial.js"
+      ],
       "css": ["content/content.css"],
       "run_at": "document_idle"
     }
