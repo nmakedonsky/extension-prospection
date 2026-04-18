@@ -2,9 +2,9 @@
  * LinkedIn Jobs — badges SS2I / Client (search-results & collections).
  * Télémétrie : heartbeat vers Supabase uniquement (pas d’UI sur la page).
  *
- * Collections (/jobs/collections/*) : stratégie dédiée — pas de sélecteurs « carte » fragiles.
- * On part des liens d’offre (href view / currentJobId), on filtre par position (colonne gauche
- * vs panneau détail), puis on remonte à un conteneur carte. Repli : cartes componentkey visibles à gauche.
+ * Critères de succès (QA) :
+ * - Collections : collectJobCards().length > 0 après scroll modéré ; badges sur le nom société de la liste, pas le panneau détail.
+ * - Search-results : comportement inchangé (branche dédiée collectJobCardsSearchResults).
  */
 
 const DATA_PROCESSED = 'data-pn-processed';
@@ -28,6 +28,30 @@ const JOB_CARD_SELECTORS = [
 const JOB_LINK_SELECTOR =
   'a[href*="/jobs/view/"], a[href*="/jobs/search/"], a[href*="/jobs/search-results"], a[href*="/jobs/collections"], a[href*="currentJobId="]';
 
+const JOB_VIEW_LINK_SELECTOR = 'a[href*="/jobs/view/"]';
+
+/** @type {{ linkedinCollectionsCardCss?: string, linkedinCollectionsCompanyCss?: string }} */
+let pageConfig = {};
+
+function hydratePageConfig() {
+  try {
+    chrome.storage.local.get('config', (r) => {
+      const c = r && r.config && typeof r.config === 'object' ? r.config : {};
+      pageConfig = {
+        linkedinCollectionsCardCss: String(c.linkedinCollectionsCardCss || '').trim(),
+        linkedinCollectionsCompanyCss: String(c.linkedinCollectionsCompanyCss || '').trim()
+      };
+    });
+  } catch (_) {}
+}
+
+hydratePageConfig();
+try {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.config) hydratePageConfig();
+  });
+} catch (_) {}
+
 function querySelectorAllDeep(root, selector) {
   if (!root?.querySelectorAll) return [];
   const out = [];
@@ -49,8 +73,32 @@ function querySelectorAllDeep(root, selector) {
   return out;
 }
 
+function getScanRoots() {
+  const roots = [];
+  const main = document.querySelector('main');
+  const app = document.querySelector('#root');
+  if (main) roots.push(main);
+  if (app && app !== main) roots.push(app);
+  if (!roots.length) roots.push(document.body);
+  return roots;
+}
+
+/** Colonne liste (two-pane) : bord droit dans la moitié gauche — utilisé pour éviter les faux positifs « détail » sur /jobs/collections/. */
+function isInLeftJobListColumn(el) {
+  const vw = window.innerWidth || 1200;
+  const r = el?.getBoundingClientRect?.();
+  if (!r || r.width < 4 || r.height < 4) return false;
+  return r.right < vw * 0.58;
+}
+
+/**
+ * Vrai panneau détail (offre ouverte à droite). Sur Collections, des wrappers englobent parfois
+ * toute la page avec des classes type scaffold/two-pane — on n’applique ces signaux « faibles »
+ * que si le nœud n’est pas dans la colonne liste.
+ */
 function isNodeInJobDetailsComposed(el) {
   if (!el) return false;
+  const relaxWeakDetailSignals = isJobsCollectionsPath() && isInLeftJobListColumn(el);
   let n = el;
   while (n) {
     if (n.nodeType === 1) {
@@ -59,11 +107,18 @@ function isNodeInJobDetailsComposed(el) {
       let cls = '';
       if (typeof n.className === 'string') cls = n.className;
       else if (n.className && typeof n.className.baseVal === 'string') cls = n.className.baseVal;
+      if (cls.includes('jobs-unified-top-card') || cls.includes('jobs-search__job-details')) {
+        return true;
+      }
+      if (relaxWeakDetailSignals) {
+        const root = n.getRootNode?.({ composed: false });
+        if (root instanceof ShadowRoot) n = root.host;
+        else n = n.parentElement;
+        continue;
+      }
       if (
         cls.includes('scaffold-layout__detail') ||
-        cls.includes('jobs-search__job-details') ||
         cls.includes('jobs-search-two-pane__details') ||
-        cls.includes('jobs-unified-top-card') ||
         (cls.includes('two-pane') && cls.includes('detail'))
       ) {
         return true;
@@ -76,13 +131,6 @@ function isNodeInJobDetailsComposed(el) {
   return false;
 }
 
-/** Centre horizontal de l’élément (viewport), pour séparer liste gauche / fiche droite. */
-function elementCenterX(el) {
-  const r = el?.getBoundingClientRect?.();
-  if (!r) return null;
-  return r.left + r.width / 2;
-}
-
 function isLikelyLeftColumnJobCard(el) {
   const vw = window.innerWidth || 1200;
   const r = el.getBoundingClientRect?.();
@@ -92,120 +140,32 @@ function isLikelyLeftColumnJobCard(el) {
   return true;
 }
 
-function isJobsCollectionsPath() {
-  try {
-    return String(location.pathname || '').includes('/jobs/collections');
-  } catch (_) {
-    return false;
-  }
-}
-
-/**
- * Sur Collections, le panneau détail est à droite : les cartes liste ont le centre du nœud
- * nettement dans la portion gauche de la fenêtre (seuil un peu plus large que search-results).
- */
-function isInLeftJobsColumn(el, maxCenterRatio) {
+/** Liste Collections : bord droit dans la colonne gauche (~two-pane) ou centre comme search-results. */
+function isLikelyCollectionsListCard(el) {
   const vw = window.innerWidth || 1200;
-  const cx = elementCenterX(el);
-  if (cx == null) return false;
-  const r = el.getBoundingClientRect();
-  if (r.width < 4 && r.height < 4) return false;
-  return cx < vw * maxCenterRatio;
+  const r = el.getBoundingClientRect?.();
+  if (!r || r.width < 8 || r.height < 8) return false;
+  if (r.right < vw * 0.58) return true;
+  const cx = r.left + r.width / 2;
+  return cx <= vw * 0.72;
 }
 
-/**
- * Remonte depuis un lien « offre » vers un nœud qui ressemble à une ligne de liste.
- */
 function inferCardWrapperFromJobLink(anchor) {
-  if (!anchor) return null;
   let n = anchor;
-  for (let depth = 0; depth < 16 && n; depth++) {
-    if (n.nodeType !== 1) {
-      n = n.parentElement;
-      continue;
-    }
-    if (n.tagName === 'LI') return n;
-    const ck = n.getAttribute?.('componentkey') || '';
-    if (/^job-card-component-ref-\d+$/i.test(ck)) return n;
-    if (n.hasAttribute?.('data-job-id') || n.hasAttribute?.('data-occludable-job-id')) return n;
-    const cls = typeof n.className === 'string' ? n.className : '';
-    if (/\bjob-card|entity-result|semantic-search|base-card\b/i.test(cls) && n.tagName === 'DIV') {
-      return n;
+  let depth = 0;
+  while (n && depth < 18) {
+    if (n.nodeType === 1) {
+      const tag = n.tagName?.toLowerCase() || '';
+      const dj = n.getAttribute?.('data-job-id') || n.getAttribute?.('data-occludable-job-id') || '';
+      const ck = String(n.getAttribute?.('componentkey') || '');
+      if (dj || /job-card/i.test(ck)) return n;
+      if (tag === 'li' && n.querySelector?.(JOB_VIEW_LINK_SELECTOR)) return n;
+      if (tag === 'article') return n;
     }
     n = n.parentElement;
+    depth++;
   }
-  return anchor.parentElement?.parentElement || anchor.parentElement || null;
-}
-
-/**
- * Collections : cartes = ancres vers offres dans la moitié gauche + inférence de conteneur.
- * Repli : div[componentkey^=job-card-component-ref] à gauche (certains builds peuvent peupler sans <a> listé).
- */
-function collectJobCardsCollections() {
-  const LEFT_MAX = 0.74;
-  const seen = new Set();
-  const out = [];
-
-  const anchorSelector = 'a[href*="/jobs/view/"], a[href*="currentJobId="]';
-  const anchors = querySelectorAllDeep(document.documentElement, anchorSelector);
-
-  for (const a of anchors) {
-    let href = '';
-    try {
-      href = (a.getAttribute('href') || '').toLowerCase();
-    } catch (_) {
-      continue;
-    }
-    if (!href.includes('/jobs/view') && !href.includes('currentjobid')) continue;
-
-    if (!isInLeftJobsColumn(a, LEFT_MAX)) continue;
-    if (isNodeInJobDetailsComposed(a)) continue;
-
-    const card = inferCardWrapperFromJobLink(a);
-    if (!card || seen.has(card)) continue;
-    if (isNodeInJobDetailsComposed(card)) continue;
-    if (!isInLeftJobsColumn(card, LEFT_MAX)) continue;
-
-    seen.add(card);
-    out.push(card);
-  }
-
-  const ckSelector = 'div[role="button"][componentkey^="job-card-component-ref-"], div[componentkey^="job-card-component-ref-"]';
-  for (const el of querySelectorAllDeep(document.documentElement, ckSelector)) {
-    if (seen.has(el)) continue;
-    if (isNodeInJobDetailsComposed(el)) continue;
-    if (!isInLeftJobsColumn(el, LEFT_MAX)) continue;
-    const r = el.getBoundingClientRect();
-    if (r.width < 20 || r.height < 20) continue;
-    seen.add(el);
-    out.push(el);
-  }
-
-  return out;
-}
-
-function collectJobCardsSearchResults() {
-  const roots = [];
-  const main = document.querySelector('main');
-  const app = document.querySelector('#root');
-  if (main) roots.push(main);
-  if (app && app !== main) roots.push(app);
-  if (!roots.length) roots.push(document.body);
-
-  const seen = new Set();
-  const cards = [];
-  for (const root of roots) {
-    for (const sel of JOB_CARD_SELECTORS) {
-      for (const el of querySelectorAllDeep(root, sel)) {
-        if (seen.has(el)) continue;
-        if (isNodeInJobDetailsComposed(el)) continue;
-        if (!isLikelyLeftColumnJobCard(el)) continue;
-        seen.add(el);
-        cards.push(el);
-      }
-    }
-  }
-  return cards;
+  return anchor?.parentElement || anchor;
 }
 
 function isNoiseCompanyText(t) {
@@ -219,8 +179,19 @@ function isNoiseCompanyText(t) {
   return false;
 }
 
+function isJobsCollectionsPath() {
+  return String(location.pathname || '').includes('/jobs/collections');
+}
+
 function findCompanyElementInCard(card) {
   if (!card?.querySelector) return null;
+  const custom = pageConfig.linkedinCollectionsCompanyCss;
+  if (custom && isJobsCollectionsPath()) {
+    try {
+      const hit = card.querySelector(custom);
+      if (hit) return hit;
+    } catch (_) {}
+  }
   const linked =
     card.querySelector(':scope a[href*="/company/"]') ||
     card.querySelector('a[href*="/company/"]');
@@ -266,11 +237,177 @@ function dedupeKeyForCard(card) {
   return `pos:${card.getBoundingClientRect().top | 0}`;
 }
 
-function collectJobCards() {
-  if (isJobsCollectionsPath()) {
-    return collectJobCardsCollections();
+function collectJobCardsSearchResults() {
+  const roots = getScanRoots();
+  const seen = new Set();
+  const cards = [];
+  for (const root of roots) {
+    for (const sel of JOB_CARD_SELECTORS) {
+      for (const el of querySelectorAllDeep(root, sel)) {
+        if (seen.has(el)) continue;
+        if (isNodeInJobDetailsComposed(el)) continue;
+        if (!isLikelyLeftColumnJobCard(el)) continue;
+        seen.add(el);
+        cards.push(el);
+      }
+    }
   }
-  return collectJobCardsSearchResults();
+  return cards;
+}
+
+function collectJobCardsCollections() {
+  const roots = getScanRoots();
+  const seen = new Set();
+  const cards = [];
+
+  function pushCard(el) {
+    if (!el || seen.has(el)) return;
+    if (isNodeInJobDetailsComposed(el)) return;
+    if (!isLikelyCollectionsListCard(el)) return;
+    seen.add(el);
+    cards.push(el);
+  }
+
+  const custom = pageConfig.linkedinCollectionsCardCss;
+  if (custom) {
+    for (const root of roots) {
+      try {
+        querySelectorAllDeep(root, custom).forEach(pushCard);
+      } catch (_) {}
+    }
+    if (cards.length) return cards;
+  }
+
+  for (const root of roots) {
+    for (const sel of JOB_CARD_SELECTORS) {
+      try {
+        for (const el of querySelectorAllDeep(root, sel)) {
+          pushCard(el);
+        }
+      } catch (_) {}
+    }
+  }
+
+  const vw = window.innerWidth || 1200;
+  for (const root of roots) {
+    for (const a of querySelectorAllDeep(root, JOB_VIEW_LINK_SELECTOR)) {
+      if (isNodeInJobDetailsComposed(a)) continue;
+      const r = a.getBoundingClientRect?.();
+      if (!r) continue;
+      const inList =
+        r.right < vw * 0.58 || r.left + r.width / 2 <= vw * 0.72;
+      if (!inList) continue;
+      const card = inferCardWrapperFromJobLink(a);
+      pushCard(card);
+    }
+  }
+
+  return cards;
+}
+
+function collectJobCards() {
+  return isJobsCollectionsPath() ? collectJobCardsCollections() : collectJobCardsSearchResults();
+}
+
+function truncateRect(rect) {
+  if (!rect) return null;
+  return {
+    left: Math.round(rect.left),
+    top: Math.round(rect.top),
+    right: Math.round(rect.right),
+    bottom: Math.round(rect.bottom),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height)
+  };
+}
+
+function outerHtmlSnippet(el, maxLen) {
+  if (!el?.outerHTML) return '';
+  const s = el.outerHTML.replace(/\s+/g, ' ').trim();
+  return s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
+}
+
+/**
+ * Rapport diagnostic : compteurs par sélecteur (raw → détail → géométrie search),
+ * tailles des branches search/collections, stratégie liens.
+ */
+function buildDomDiagnosticReport() {
+  const vw = window.innerWidth || 1200;
+  const roots = getScanRoots();
+  const perSelector = [];
+
+  for (const sel of JOB_CARD_SELECTORS) {
+    let raw = 0;
+    let afterDetail = 0;
+    let afterGeoSearch = 0;
+    let afterGeoCollections = 0;
+    const samples = [];
+    for (const root of roots) {
+      for (const el of querySelectorAllDeep(root, sel)) {
+        raw++;
+        if (isNodeInJobDetailsComposed(el)) continue;
+        afterDetail++;
+        if (isLikelyLeftColumnJobCard(el)) afterGeoSearch++;
+        if (isLikelyCollectionsListCard(el)) afterGeoCollections++;
+        if (samples.length < 2) {
+          samples.push({
+            tag: el.tagName,
+            class: String(typeof el.className === 'string' ? el.className : '').slice(0, 100),
+            rect: truncateRect(el.getBoundingClientRect()),
+            snippet: outerHtmlSnippet(el, 220)
+          });
+        }
+      }
+    }
+    perSelector.push({
+      selector: sel,
+      raw,
+      afterExcludingDetailPanel: afterDetail,
+      afterGeometrySearchResults: afterGeoSearch,
+      afterGeometryCollections: afterGeoCollections,
+      samples
+    });
+  }
+
+  let anchorTotal = 0;
+  let anchorInListColumn = 0;
+  let anchorAfterDetail = 0;
+  for (const root of roots) {
+    for (const a of querySelectorAllDeep(root, JOB_VIEW_LINK_SELECTOR)) {
+      anchorTotal++;
+      if (isNodeInJobDetailsComposed(a)) continue;
+      anchorAfterDetail++;
+      const r = a.getBoundingClientRect?.();
+      if (!r) continue;
+      if (r.right < vw * 0.58 || r.left + r.width / 2 <= vw * 0.72) anchorInListColumn++;
+    }
+  }
+
+  const searchCards = collectJobCardsSearchResults();
+  const collectionsCards = collectJobCardsCollections();
+  const active = collectJobCards();
+
+  return {
+    pathname: String(location.pathname || ''),
+    href: String(location.href || '').slice(0, 500),
+    viewportWidth: vw,
+    dispatch: isJobsCollectionsPath() ? 'collections' : 'search-results',
+    counts: {
+      collectJobCardsSearchResults: searchCards.length,
+      collectJobCardsCollections: collectionsCards.length,
+      collectJobCardsActive: active.length
+    },
+    perSelector,
+    linkStrategy: {
+      anchorsTotalDeep: anchorTotal,
+      anchorsExcludingDetail: anchorAfterDetail,
+      anchorsInListColumnHeuristic: anchorInListColumn
+    },
+    config: {
+      linkedinCollectionsCardCss: pageConfig.linkedinCollectionsCardCss || '',
+      linkedinCollectionsCompanyCss: pageConfig.linkedinCollectionsCompanyCss || ''
+    }
+  };
 }
 
 function buildScanPayload() {
@@ -287,7 +424,8 @@ function buildScanPayload() {
   return {
     cardCount: cards.length,
     companyCount: companies.length,
-    sampleCompanies: companies.slice(0, 8)
+    sampleCompanies: companies.slice(0, 8),
+    pageKind: isJobsCollectionsPath() ? 'collections' : 'search-results'
   };
 }
 
@@ -477,3 +615,16 @@ setInterval(() => {
     scheduleTick();
   }
 }, 800);
+
+try {
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (!msg || msg.type !== 'PROSPECTION_DOM_DIAGNOSTIC') return false;
+    try {
+      const report = buildDomDiagnosticReport();
+      sendResponse({ ok: true, report });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
+    }
+    return true;
+  });
+} catch (_) {}

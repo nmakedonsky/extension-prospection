@@ -35,6 +35,23 @@
   </section>
 
   <section class="block">
+    <h2>LinkedIn Collections</h2>
+    <p class="hint">Sélecteurs optionnels si le DOM de votre build diffère. Laisser vide pour la détection automatique (liens <code>/jobs/view/</code> + géométrie).</p>
+    <label for="linkedinCollectionsCardCss">Carte (liste) — CSS</label>
+    <input type="text" id="linkedinCollectionsCardCss" autocomplete="off" placeholder="ex. li.jobs-collection-job-card">
+    <label for="linkedinCollectionsCompanyCss">Nom société — CSS relatif à la carte</label>
+    <input type="text" id="linkedinCollectionsCompanyCss" autocomplete="off" placeholder="ex. .artdeco-entity-lockup__subtitle">
+    <div class="row">
+      <button type="button" id="saveLinkedinSelectors" class="secondary">Enregistrer</button>
+      <button type="button" id="runDomDiagnostic">Diagnostic DOM</button>
+    </div>
+    <p id="linkedinDiagStatus" class="status" aria-live="polite"></p>
+    <label for="linkedinDiagOut">Rapport (onglet LinkedIn Jobs actif)</label>
+    <textarea id="linkedinDiagOut" class="diag-out" readonly rows="10" placeholder='Cliquez sur « Diagnostic DOM » sur une page /jobs/collections ou /jobs/search-results…'></textarea>
+    <button type="button" id="copyDomDiagnostic" class="secondary full-width">Copier le rapport</button>
+  </section>
+
+  <section class="block">
     <h2>HubSpot</h2>
     <label for="hubspotRegion">Région API</label>
     <select id="hubspotRegion">

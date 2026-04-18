@@ -67,6 +67,8 @@ async function loadFields() {
   $('geminiKey').value = config.geminiApiKey || '';
   $('supabaseUrl').value = config.supabaseUrl || '';
   $('supabaseKey').value = config.supabaseAnonKey || '';
+  $('linkedinCollectionsCardCss').value = config.linkedinCollectionsCardCss || '';
+  $('linkedinCollectionsCompanyCss').value = config.linkedinCollectionsCompanyCss || '';
   $('hubspotKey').value = config.hubspotApiKey || '';
   const region = String(config.hubspotRegion || 'eu').toLowerCase();
   $('hubspotRegion').value = region === 'us' ? 'us' : 'eu';
@@ -158,6 +160,63 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         setStatus(el, `HubSpot : échec — ${r.error || 'erreur inconnue'}`, 'err');
       }
+    } catch (e) {
+      setStatus(el, String(e.message || e), 'err');
+    }
+  });
+
+  $('saveLinkedinSelectors').addEventListener('click', async () => {
+    const el = $('linkedinDiagStatus');
+    try {
+      await saveConfig({
+        linkedinCollectionsCardCss: $('linkedinCollectionsCardCss').value.trim(),
+        linkedinCollectionsCompanyCss: $('linkedinCollectionsCompanyCss').value.trim()
+      });
+      setStatus(el, 'Sélecteurs enregistrés. Rechargez l’onglet LinkedIn Jobs.', 'ok');
+    } catch (e) {
+      setStatus(el, String(e.message || e), 'err');
+    }
+  });
+
+  $('runDomDiagnostic').addEventListener('click', async () => {
+    const el = $('linkedinDiagStatus');
+    const out = $('linkedinDiagOut');
+    setStatus(el, 'Collecte…', '');
+    out.value = '';
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) {
+        setStatus(el, 'Onglet actif introuvable.', 'err');
+        return;
+      }
+      chrome.tabs.sendMessage(tab.id, { type: 'PROSPECTION_DOM_DIAGNOSTIC' }, (res) => {
+        const last = chrome.runtime.lastError;
+        if (last) {
+          setStatus(el, `Impossible d’atteindre la page — ${last.message}`, 'err');
+          return;
+        }
+        if (!res || !res.ok) {
+          setStatus(el, (res && res.error) || 'Réponse invalide.', 'err');
+          return;
+        }
+        out.value = JSON.stringify(res.report, null, 2);
+        setStatus(el, 'Rapport prêt.', 'ok');
+      });
+    } catch (e) {
+      setStatus(el, String(e.message || e), 'err');
+    }
+  });
+
+  $('copyDomDiagnostic').addEventListener('click', async () => {
+    const el = $('linkedinDiagStatus');
+    const t = $('linkedinDiagOut').value;
+    if (!t) {
+      setStatus(el, 'Rien à copier.', 'err');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(t);
+      setStatus(el, 'Copié dans le presse-papiers.', 'ok');
     } catch (e) {
       setStatus(el, String(e.message || e), 'err');
     }

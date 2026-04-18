@@ -412,6 +412,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       cardCount: p.cardCount,
       companyCount: p.companyCount,
       sampleCompanies: p.sampleCompanies,
+      pageKind: p.pageKind,
       pageUrl: p.pageUrl,
       tabId: sender?.tab?.id ?? null
     })
