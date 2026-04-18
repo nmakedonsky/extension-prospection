@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Prospection (squelette)",
-  "version": "0.0.1",
-  "description": "Squelette — connexions Gemini, Supabase, HubSpot uniquement.",
+  "name": "Prospection",
+  "version": "0.1.0",
+  "description": "LinkedIn Jobs — scan liste, journalisation Supabase ; Gemini & HubSpot configurés dans la popup.",
   "permissions": ["storage"],
   "host_permissions": [
+    "https://www.linkedin.com/*",
+    "https://*.linkedin.com/*",
     "https://generativelanguage.googleapis.com/*",
     "https://*.supabase.co/*",
     "https://api.hubapi.com/*",
@@ -16,5 +18,17 @@
   },
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.linkedin.com/jobs/*",
+        "https://linkedin.com/jobs/*",
+        "https://*.linkedin.com/jobs/*"
+      ],
+      "js": ["content/jobs-page.js"],
+      "css": ["content/content.css"],
+      "run_at": "document_idle"
+    }
+  ]
 }
