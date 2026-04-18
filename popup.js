@@ -1,16 +1,47 @@
 /**
- * Popup — charge / enregistre la config et déclenche les tests via le service worker.
+ * Popup — raccourcis recherches Jobs + configuration API (menu repliable).
  */
 
 function $(id) {
   return document.getElementById(id);
 }
 
+const STORAGE_KEY_SAVED_SEARCHES = 'lphSavedJobSearches';
+const MAX_SAVED_SEARCHES = 5;
+
+function linkedInJobsSearchUrl(keywords) {
+  return `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(keywords)}`;
+}
+
+const DEFAULT_SAVED_JOB_SEARCHES = [
+  {
+    title: 'Lead / ownership data',
+    url: linkedInJobsSearchUrl('Head of Data OR Lead Data OR Data Platform Lead')
+  },
+  {
+    title: 'Ingénieur / plateforme data',
+    url: linkedInJobsSearchUrl('Data Engineer Snowflake Airflow dbt')
+  },
+  {
+    title: 'BI (votre axe fort)',
+    url: linkedInJobsSearchUrl('Power BI PowerBI Lead Senior Manager Expert')
+  },
+  {
+    title: 'Gouvernance / qualité',
+    url: linkedInJobsSearchUrl('Data Governance Data Quality Responsable données')
+  },
+  {
+    title: 'Transfo / digital avec dimension data',
+    url: linkedInJobsSearchUrl('Digital Manager data BI analytics données')
+  }
+];
+
 function setStatus(el, text, kind) {
   el.textContent = text || '';
-  el.classList.remove('ok', 'err');
+  el.classList.remove('ok', 'err', 'warn');
   if (kind === 'ok') el.classList.add('ok');
   if (kind === 'err') el.classList.add('err');
+  if (kind === 'warn') el.classList.add('warn');
 }
 
 async function getConfig() {
@@ -62,20 +93,166 @@ function sendTest(type, payload) {
   });
 }
 
-async function loadFields() {
+function normalizeJobSearchUrl(raw) {
+  let u = String(raw || '').trim();
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+  return u;
+}
+
+function isLinkedInJobsUrl(u) {
+  try {
+    const p = new URL(u);
+    const host = p.hostname.toLowerCase();
+    const hostOk =
+      host === 'linkedin.com' ||
+      host === 'www.linkedin.com' ||
+      host.endsWith('.linkedin.com');
+    return hostOk && /\/jobs/i.test(`${p.pathname}${p.search}`);
+  } catch {
+    return false;
+  }
+}
+
+function renderSavedSearches(rows) {
+  const c = $('savedSearchesContainer');
+  c.replaceChildren();
+
+  for (let i = 0; i < MAX_SAVED_SEARCHES; i++) {
+    const row = rows[i] || { title: '', url: '' };
+    const slot = document.createElement('div');
+    slot.className = 'search-slot';
+
+    const head = document.createElement('div');
+    head.className = 'search-slot-head';
+    head.textContent = `Recherche ${i + 1}`;
+    slot.appendChild(head);
+
+    const lt = document.createElement('label');
+    lt.htmlFor = `searchTitle${i}`;
+    lt.textContent = 'Nom affiché';
+    slot.appendChild(lt);
+
+    const it = document.createElement('input');
+    it.type = 'text';
+    it.id = `searchTitle${i}`;
+    it.placeholder = 'ex. Lead / ownership data';
+    it.value = row.title || '';
+    it.autocomplete = 'off';
+    slot.appendChild(it);
+
+    const lu = document.createElement('label');
+    lu.htmlFor = `searchUrl${i}`;
+    lu.style.marginTop = '8px';
+    lu.textContent = 'URL';
+    slot.appendChild(lu);
+
+    const iu = document.createElement('input');
+    iu.type = 'text';
+    iu.id = `searchUrl${i}`;
+    iu.placeholder = 'https://www.linkedin.com/jobs/search/?keywords=...';
+    iu.value = row.url || '';
+    iu.spellcheck = false;
+    iu.autocomplete = 'off';
+    slot.appendChild(iu);
+
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+    const ob = document.createElement('button');
+    ob.type = 'button';
+    ob.className = 'secondary open-search';
+    ob.textContent = 'Ouvrir';
+    ob.addEventListener('click', () => openSavedSearch(i));
+    actions.appendChild(ob);
+    slot.appendChild(actions);
+
+    c.appendChild(slot);
+  }
+}
+
+function allSearchUrlsEmpty(rows) {
+  return (
+    Array.isArray(rows) &&
+    rows.length > 0 &&
+    rows.every((r) => !String(r?.url || '').trim())
+  );
+}
+
+async function loadSavedSearches() {
+  const result = await chrome.storage.local.get(STORAGE_KEY_SAVED_SEARCHES);
+  let rows = result[STORAGE_KEY_SAVED_SEARCHES];
+  if (!Array.isArray(rows)) rows = [];
+
+  const shouldSeedDefaults = rows.length === 0 || allSearchUrlsEmpty(rows);
+  if (shouldSeedDefaults) {
+    rows = DEFAULT_SAVED_JOB_SEARCHES.map((r) => ({ ...r }));
+    await chrome.storage.local.set({ [STORAGE_KEY_SAVED_SEARCHES]: rows });
+  } else {
+    while (rows.length < MAX_SAVED_SEARCHES) {
+      rows.push({ title: '', url: '' });
+    }
+    rows = rows.slice(0, MAX_SAVED_SEARCHES);
+  }
+
+  renderSavedSearches(rows);
+}
+
+async function persistSearchesFromForm() {
+  const rows = [];
+  for (let i = 0; i < MAX_SAVED_SEARCHES; i++) {
+    const t = $(`searchTitle${i}`);
+    const u = $(`searchUrl${i}`);
+    rows.push({
+      title: (t && t.value.trim()) || '',
+      url: (u && u.value.trim()) || ''
+    });
+  }
+  await chrome.storage.local.set({ [STORAGE_KEY_SAVED_SEARCHES]: rows });
+  return rows;
+}
+
+async function openSavedSearch(index) {
+  const u = $(`searchUrl${index}`);
+  const raw = u ? u.value.trim() : '';
+  const url = normalizeJobSearchUrl(raw);
+  const status = $('searchesStatus');
+
+  if (!url) {
+    setStatus(status, 'Indique une URL pour cette recherche.', 'warn');
+    return;
+  }
+  if (!isLinkedInJobsUrl(url)) {
+    setStatus(status, 'URL invalide : une page LinkedIn Jobs (…/jobs/…).', 'warn');
+    return;
+  }
+
+  setStatus(status, '', '');
+  await chrome.tabs.create({ url });
+}
+
+async function loadApiFields() {
   const config = await getConfig();
   $('geminiKey').value = config.geminiApiKey || '';
   $('supabaseUrl').value = config.supabaseUrl || '';
   $('supabaseKey').value = config.supabaseAnonKey || '';
-  $('linkedinCollectionsCardCss').value = config.linkedinCollectionsCardCss || '';
-  $('linkedinCollectionsCompanyCss').value = config.linkedinCollectionsCompanyCss || '';
   $('hubspotKey').value = config.hubspotApiKey || '';
   const region = String(config.hubspotRegion || 'eu').toLowerCase();
   $('hubspotRegion').value = region === 'us' ? 'us' : 'eu';
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  loadFields().catch(() => {});
+  loadSavedSearches().catch(() => {});
+  loadApiFields().catch(() => {});
+
+  $('saveSearches').addEventListener('click', async () => {
+    const el = $('searchesStatus');
+    try {
+      await persistSearchesFromForm();
+      setStatus(el, 'Recherches enregistrées ✓', 'ok');
+    } catch (e) {
+      setStatus(el, String(e.message || e), 'err');
+    }
+  });
 
   $('saveGemini').addEventListener('click', async () => {
     const el = $('geminiStatus');
@@ -160,19 +337,6 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         setStatus(el, `HubSpot : échec — ${r.error || 'erreur inconnue'}`, 'err');
       }
-    } catch (e) {
-      setStatus(el, String(e.message || e), 'err');
-    }
-  });
-
-  $('saveLinkedinSelectors').addEventListener('click', async () => {
-    const el = $('linkedinDiagStatus');
-    try {
-      await saveConfig({
-        linkedinCollectionsCardCss: $('linkedinCollectionsCardCss').value.trim(),
-        linkedinCollectionsCompanyCss: $('linkedinCollectionsCompanyCss').value.trim()
-      });
-      setStatus(el, 'Sélecteurs enregistrés. Rechargez l’onglet LinkedIn Jobs.', 'ok');
     } catch (e) {
       setStatus(el, String(e.message || e), 'err');
     }

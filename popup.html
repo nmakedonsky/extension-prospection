@@ -8,64 +8,75 @@
 </head>
 <body>
   <h1>Prospection</h1>
-  <p class="subtitle">Badges SS2I / Client sur LinkedIn. Les journaux d’activité sont dans Supabase (<code>extension_logs</code>).</p>
+  <p class="subtitle">Badges SS2I / Client sur les résultats de recherche LinkedIn Jobs. Enregistrez des URLs de recherche puis ouvrez-les pour afficher la liste.</p>
 
-  <section class="block">
-    <h2>Gemini</h2>
-    <label for="geminiKey">Clé API (Google AI Studio)</label>
-    <input type="password" id="geminiKey" autocomplete="off" placeholder="AIza…">
-    <div class="row">
-      <button type="button" id="saveGemini" class="secondary">Enregistrer</button>
-      <button type="button" id="testGemini">Tester</button>
-    </div>
-    <p id="geminiStatus" class="status" aria-live="polite"></p>
+  <section class="block block--main">
+    <h2>Recherches LinkedIn</h2>
+    <p class="hint">Collez l’URL depuis la barre d’adresse sur une page de résultats Jobs, enregistrez, puis « Ouvrir » — l’extension s’active sur l’onglet.</p>
+    <div id="savedSearchesContainer"></div>
+    <button type="button" id="saveSearches" class="secondary full-width">Enregistrer les recherches</button>
+    <p id="searchesStatus" class="status" aria-live="polite"></p>
   </section>
 
-  <section class="block">
-    <h2>Supabase</h2>
-    <label for="supabaseUrl">URL du projet</label>
-    <input type="text" id="supabaseUrl" autocomplete="off" placeholder="https://….supabase.co">
-    <label for="supabaseKey">Clé anon</label>
-    <input type="password" id="supabaseKey" autocomplete="off" placeholder="eyJ…">
-    <div class="row">
-      <button type="button" id="saveSupabase" class="secondary">Enregistrer</button>
-      <button type="button" id="testSupabase">Tester</button>
-    </div>
-    <p id="supabaseStatus" class="status" aria-live="polite"></p>
-  </section>
+  <details class="settings-details" id="settingsDetails">
+    <summary class="settings-summary">Paramètres API et outils</summary>
+    <div class="settings-inner">
 
-  <section class="block">
-    <h2>LinkedIn Collections</h2>
-    <p class="hint">Sélecteurs optionnels si le DOM de votre build diffère. Laisser vide pour la détection automatique (liens <code>/jobs/view/</code> + géométrie).</p>
-    <label for="linkedinCollectionsCardCss">Carte (liste) — CSS</label>
-    <input type="text" id="linkedinCollectionsCardCss" autocomplete="off" placeholder="ex. li.jobs-collection-job-card">
-    <label for="linkedinCollectionsCompanyCss">Nom société — CSS relatif à la carte</label>
-    <input type="text" id="linkedinCollectionsCompanyCss" autocomplete="off" placeholder="ex. .artdeco-entity-lockup__subtitle">
-    <div class="row">
-      <button type="button" id="saveLinkedinSelectors" class="secondary">Enregistrer</button>
-      <button type="button" id="runDomDiagnostic">Diagnostic DOM</button>
-    </div>
-    <p id="linkedinDiagStatus" class="status" aria-live="polite"></p>
-    <label for="linkedinDiagOut">Rapport (onglet LinkedIn Jobs actif)</label>
-    <textarea id="linkedinDiagOut" class="diag-out" readonly rows="10" placeholder='Cliquez sur « Diagnostic DOM » sur une page /jobs/collections ou /jobs/search-results…'></textarea>
-    <button type="button" id="copyDomDiagnostic" class="secondary full-width">Copier le rapport</button>
-  </section>
+      <section class="block">
+        <h2>Gemini</h2>
+        <label for="geminiKey">Clé API (Google AI Studio)</label>
+        <input type="password" id="geminiKey" autocomplete="off" placeholder="AIza…">
+        <div class="row">
+          <button type="button" id="saveGemini" class="secondary">Enregistrer</button>
+          <button type="button" id="testGemini">Tester</button>
+        </div>
+        <p id="geminiStatus" class="status" aria-live="polite"></p>
+      </section>
 
-  <section class="block">
-    <h2>HubSpot</h2>
-    <label for="hubspotRegion">Région API</label>
-    <select id="hubspotRegion">
-      <option value="eu">EU (api-eu1.hubapi.com)</option>
-      <option value="us">US (api.hubapi.com)</option>
-    </select>
-    <label for="hubspotKey">Clé Private App</label>
-    <input type="password" id="hubspotKey" autocomplete="off" placeholder="pat-… ou eu1-…">
-    <div class="row">
-      <button type="button" id="saveHubspot" class="secondary">Enregistrer</button>
-      <button type="button" id="testHubspot">Tester</button>
+      <section class="block">
+        <h2>Supabase</h2>
+        <p class="hint">Journaux et cache entreprises (<code>extension_logs</code>, table <code>companies</code>).</p>
+        <label for="supabaseUrl">URL du projet</label>
+        <input type="text" id="supabaseUrl" autocomplete="off" placeholder="https://….supabase.co">
+        <label for="supabaseKey">Clé anon</label>
+        <input type="password" id="supabaseKey" autocomplete="off" placeholder="eyJ…">
+        <div class="row">
+          <button type="button" id="saveSupabase" class="secondary">Enregistrer</button>
+          <button type="button" id="testSupabase">Tester</button>
+        </div>
+        <p id="supabaseStatus" class="status" aria-live="polite"></p>
+      </section>
+
+      <section class="block">
+        <h2>HubSpot</h2>
+        <label for="hubspotRegion">Région API</label>
+        <select id="hubspotRegion">
+          <option value="eu">EU (api-eu1.hubapi.com)</option>
+          <option value="us">US (api.hubapi.com)</option>
+        </select>
+        <label for="hubspotKey">Clé Private App</label>
+        <input type="password" id="hubspotKey" autocomplete="off" placeholder="pat-… ou eu1-…">
+        <div class="row">
+          <button type="button" id="saveHubspot" class="secondary">Enregistrer</button>
+          <button type="button" id="testHubspot">Tester</button>
+        </div>
+        <p id="hubspotStatus" class="status" aria-live="polite"></p>
+      </section>
+
+      <section class="block block--last">
+        <h2>Diagnostic DOM</h2>
+        <p class="hint">Onglet LinkedIn Jobs actif (<code>/jobs/search-results</code> ou autre).</p>
+        <div class="row">
+          <button type="button" id="runDomDiagnostic" class="secondary">Collecter le rapport</button>
+        </div>
+        <p id="linkedinDiagStatus" class="status" aria-live="polite"></p>
+        <label for="linkedinDiagOut">Rapport JSON</label>
+        <textarea id="linkedinDiagOut" class="diag-out" readonly rows="8" placeholder="Cliquez sur « Collecter le rapport »…"></textarea>
+        <button type="button" id="copyDomDiagnostic" class="secondary full-width">Copier le rapport</button>
+      </section>
+
     </div>
-    <p id="hubspotStatus" class="status" aria-live="polite"></p>
-  </section>
+  </details>
 
   <script src="popup.js"></script>
 </body>
