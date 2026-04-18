@@ -160,21 +160,63 @@ html.lph-financial-dock-active body:not(:has(#root)) {
   display: flex;
   flex-direction: row;
   flex-wrap: nowrap;
+  align-items: flex-start;
   gap: 6px;
   margin-bottom: 6px;
 }
 
-.lph-financial-card__actions--solo .lph-financial-card__financial-btn {
+.lph-financial-card__actions--solo .lph-financial-card__financial-block {
   flex: 1 1 100%;
+}
+
+.lph-financial-card__financial-block {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lph-financial-card__financial-heading {
+  font-size: 10px;
+  font-weight: 600;
+  color: #444;
+  line-height: 1.2;
+}
+
+/** Réserve la même hauteur que la ligne de statut HubSpot pour aligner les deux boutons. */
+.lph-financial-card__financial-action-spacer {
+  min-height: 18px;
+  flex-shrink: 0;
+}
+
+.lph-financial-card__hubspot-block {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.lph-financial-card__hubspot-heading {
+  font-size: 10px;
+  font-weight: 600;
+  color: #444;
+  line-height: 1.2;
 }
 
 .lph-financial-card__action-btn {
   flex: 1 1 0;
   min-width: 0;
   margin-top: 0 !important;
-  padding: 7px 8px !important;
+  min-height: 36px;
+  padding: 8px 10px !important;
   font-size: 11px !important;
-  line-height: 1.2;
+  line-height: 1.25 !important;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .lph-financial-card__score-row {
@@ -334,8 +376,8 @@ html.lph-financial-dock-active body:not(:has(#root)) {
   font-weight: 500;
 }
 
-.lph-financial-card__hubspot-status {
-  margin: 0 0 6px;
+.lph-financial-card__hubspot-block .lph-financial-card__hubspot-status {
+  margin: 2px 0 0;
   font-size: 10px;
   line-height: 1.35;
   color: #666;
@@ -361,13 +403,10 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 }
 
 .lph-financial-card__financial-btn {
-  display: block;
   width: 100%;
   margin-top: 0;
-  padding: 8px 12px;
   border: none;
   border-radius: 6px;
-  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   background: #0a66c2;
@@ -384,13 +423,10 @@ html.lph-financial-dock-active body:not(:has(#root)) {
 }
 
 .lph-financial-card__hubspot-btn {
-  display: block;
   width: 100%;
   margin-top: 0;
-  padding: 8px 12px;
   border: none;
   border-radius: 6px;
-  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   background: #ff7a59;

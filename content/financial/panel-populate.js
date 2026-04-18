@@ -34,28 +34,52 @@ function populateFinancialPanel(companyName, jobInfo = {}) {
   actionsRow.className =
     'lph-financial-card__actions' + (!type ? ' lph-financial-card__actions--solo' : '');
 
+  const financialBlock = document.createElement('div');
+  financialBlock.className = 'lph-financial-card__financial-block';
+
+  const financialHeading = document.createElement('div');
+  financialHeading.className = 'lph-financial-card__financial-heading';
+  financialHeading.textContent = 'Données financières';
+
   const financialBtn = document.createElement('button');
   financialBtn.type = 'button';
   financialBtn.className = 'lph-financial-card__financial-btn lph-financial-card__action-btn';
   financialBtn.textContent = 'Charger';
   financialBtn.title = 'Charger les données financières';
 
+  const financialActionSpacer = document.createElement('div');
+  financialActionSpacer.className = 'lph-financial-card__financial-action-spacer';
+  financialActionSpacer.setAttribute('aria-hidden', 'true');
+
+  financialBlock.appendChild(financialHeading);
+  financialBlock.appendChild(financialBtn);
+  financialBlock.appendChild(financialActionSpacer);
+
+  const hubspotBlock = document.createElement('div');
+  hubspotBlock.className = 'lph-financial-card__hubspot-block';
+  if (!type) hubspotBlock.style.display = 'none';
+
+  const hubspotHeading = document.createElement('div');
+  hubspotHeading.className = 'lph-financial-card__hubspot-heading';
+  hubspotHeading.textContent = 'Ajout HubSpot';
+
   const hubspotBtn = document.createElement('button');
   hubspotBtn.type = 'button';
   hubspotBtn.className = 'lph-financial-card__hubspot-btn lph-financial-card__action-btn';
   hubspotBtn.textContent = 'HubSpot';
   hubspotBtn.title = 'Ajouter ou mettre à jour dans HubSpot';
-  if (!type) hubspotBtn.style.display = 'none';
-
-  actionsRow.appendChild(financialBtn);
-  actionsRow.appendChild(hubspotBtn);
-  card.appendChild(actionsRow);
 
   const hubspotStatus = document.createElement('div');
   hubspotStatus.className = 'lph-financial-card__hubspot-status';
   hubspotStatus.textContent = type ? 'HubSpot…' : '';
-  if (!type) hubspotStatus.style.display = 'none';
-  card.appendChild(hubspotStatus);
+
+  hubspotBlock.appendChild(hubspotHeading);
+  hubspotBlock.appendChild(hubspotBtn);
+  hubspotBlock.appendChild(hubspotStatus);
+
+  actionsRow.appendChild(financialBlock);
+  actionsRow.appendChild(hubspotBlock);
+  card.appendChild(actionsRow);
 
   const scoreRow = document.createElement('div');
   scoreRow.className = 'lph-financial-card__score-row';
