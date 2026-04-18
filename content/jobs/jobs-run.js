@@ -1,5 +1,5 @@
 /**
- * Boucle d’observation DOM, tick, API debug __prospectionJobs / PROSPECTION_DOM_DIAGNOSTIC.
+ * Boucle d’observation DOM, tick, API debug __prospectionJobs.
  *
  * Critères de succès (QA) :
  * - Collections : collectJobCards().length > 0 après scroll modéré ; badges sur le nom société de la liste, pas le panneau détail.
@@ -54,17 +54,4 @@ try {
     isJobsCollectionsPath,
     isInLeftJobListColumn
   };
-} catch (_) {}
-
-try {
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (!msg || msg.type !== 'PROSPECTION_DOM_DIAGNOSTIC') return false;
-    try {
-      const report = buildDomDiagnosticReport();
-      sendResponse({ ok: true, report });
-    } catch (e) {
-      sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
-    }
-    return true;
-  });
 } catch (_) {}

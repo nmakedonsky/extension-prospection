@@ -37,18 +37,6 @@ h1 {
   font-size: 10px;
 }
 
-textarea.diag-out {
-  width: 100%;
-  min-height: 120px;
-  padding: 8px 10px;
-  margin-bottom: 8px;
-  border: 1px solid #c7c7cc;
-  border-radius: 8px;
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
-  resize: vertical;
-}
-
 button.full-width {
   flex: none;
   width: 100%;

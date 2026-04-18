@@ -63,7 +63,7 @@
         <p id="hubspotStatus" class="status" aria-live="polite"></p>
       </section>
 
-      <section class="block">
+      <section class="block block--last">
         <h2>SendPilot</h2>
         <p class="hint">API LinkedIn (campagnes, leads, messages). Clé : tableau SendPilot → Integrations → API Keys. Stockée uniquement dans le stockage local de l’extension.</p>
         <label for="sendPilotKey">Clé API</label>
@@ -73,18 +73,6 @@
           <button type="button" id="testSendPilot">Tester</button>
         </div>
         <p id="sendPilotStatus" class="status" aria-live="polite"></p>
-      </section>
-
-      <section class="block block--last">
-        <h2>Diagnostic DOM</h2>
-        <p class="hint">Onglet LinkedIn Jobs actif (<code>/jobs/search-results</code> ou autre).</p>
-        <div class="row">
-          <button type="button" id="runDomDiagnostic" class="secondary">Collecter le rapport</button>
-        </div>
-        <p id="linkedinDiagStatus" class="status" aria-live="polite"></p>
-        <label for="linkedinDiagOut">Rapport JSON</label>
-        <textarea id="linkedinDiagOut" class="diag-out" readonly rows="8" placeholder="Cliquez sur « Collecter le rapport »…"></textarea>
-        <button type="button" id="copyDomDiagnostic" class="secondary full-width">Copier le rapport</button>
       </section>
 
     </div>
