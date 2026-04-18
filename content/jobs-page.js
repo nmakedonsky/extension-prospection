@@ -1,9 +1,13 @@
 /**
- * LinkedIn Jobs — détection des cartes dans la colonne liste (gauche) et affichage d’une barre d’état.
- * Logique métier (classification, scrape détail) : étapes ultérieures.
+ * LinkedIn Jobs — liste gauche, barre d’état, badges SS2I / Client (search-results & collections).
  */
 
 const EXT_ID = 'prospection-next';
+
+const DATA_PROCESSED = 'data-pn-processed';
+const DATA_LOADING = 'data-pn-loading';
+const DATA_FAILED = 'data-pn-failed';
+const DATA_TYPE = 'data-pn-type';
 
 const JOB_CARD_SELECTORS = [
   'div[componentkey^="job-card-component-ref-"]',
@@ -110,7 +114,7 @@ function findCompanyElementInCard(card) {
 function extractCompanyName(el) {
   if (!el) return '';
   const clone = el.cloneNode(true);
-  clone.querySelectorAll?.('[data-prospection-badge]').forEach((n) => n.remove());
+  clone.querySelectorAll?.('.pn-badge').forEach((n) => n.remove());
   const text = clone.textContent?.trim() || '';
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -178,6 +182,134 @@ function buildScanPayload() {
   };
 }
 
+function applyPathMarkerClass() {
+  try {
+    const html = document.documentElement;
+    const p = String(location.pathname || '');
+    html.classList.remove('pn-path-jobs-search-results', 'pn-path-jobs-collections');
+    if (p.includes('/jobs/search-results')) html.classList.add('pn-path-jobs-search-results');
+    else if (p.includes('/jobs/collections')) html.classList.add('pn-path-jobs-collections');
+  } catch (_) {}
+}
+
+function isClassificationTargetPage() {
+  const p = String(location.pathname || '');
+  return p.includes('/jobs/search-results') || p.includes('/jobs/collections');
+}
+
+function createBadge(kind) {
+  const span = document.createElement('span');
+  span.className =
+    'pn-badge ' +
+    (kind === 'loading'
+      ? 'pn-badge--loading'
+      : kind === 'Client'
+        ? 'pn-badge--client'
+        : 'pn-badge--ss2i');
+  span.textContent = kind === 'loading' ? '…' : kind === 'Client' ? 'Client' : 'SS2I';
+  span.setAttribute('data-prospection-badge', '1');
+  return span;
+}
+
+function sendClassify(companyName) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'CLASSIFY_COMPANY', companyName }, (res) => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+        resolve(res === 'Client' || res === 'SS2I' ? res : null);
+      });
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+async function processCard(card) {
+  if (!isClassificationTargetPage()) return;
+  const cel = findCompanyElementInCard(card);
+  const companyName = extractCompanyName(cel);
+  if (!companyName || companyName.length < 2) return;
+  if (card.hasAttribute(DATA_PROCESSED)) return;
+  if (card.hasAttribute(DATA_LOADING)) return;
+  const failedAt = Number(card.getAttribute(DATA_FAILED) || '0');
+  if (failedAt && Date.now() - failedAt < 15000) return;
+
+  const hostEl = cel;
+  if (!hostEl || isNodeInJobDetailsComposed(card)) return;
+
+  card.setAttribute(DATA_LOADING, 'true');
+  hostEl.querySelectorAll('.pn-badge').forEach((b) => b.remove());
+  const placeholder = createBadge('loading');
+  hostEl.appendChild(placeholder);
+
+  try {
+    const type = await sendClassify(companyName);
+    if (placeholder.isConnected) placeholder.remove();
+    card.removeAttribute(DATA_LOADING);
+    if (!type) {
+      card.setAttribute(DATA_FAILED, String(Date.now()));
+      return;
+    }
+    card.setAttribute(DATA_PROCESSED, 'true');
+    card.setAttribute(DATA_TYPE, type);
+    card.removeAttribute(DATA_FAILED);
+    const el = findCompanyElementInCard(card);
+    if (el && !isNodeInJobDetailsComposed(el)) {
+      el.querySelectorAll('.pn-badge').forEach((b) => b.remove());
+      el.appendChild(createBadge(type));
+    }
+  } catch (_) {
+    if (placeholder.isConnected) placeholder.remove();
+    card.removeAttribute(DATA_LOADING);
+    card.setAttribute(DATA_FAILED, String(Date.now()));
+  }
+}
+
+let classifyDebounce = null;
+let lastPath = '';
+
+async function runClassificationPass() {
+  if (!isClassificationTargetPage()) return;
+
+  const cards = collectJobCards();
+  const todo = [];
+  for (const card of cards) {
+    if (card.hasAttribute(DATA_PROCESSED)) continue;
+    if (card.hasAttribute(DATA_LOADING)) continue;
+    const failedAt = Number(card.getAttribute(DATA_FAILED) || '0');
+    if (failedAt && Date.now() - failedAt < 15000) continue;
+    const cel = findCompanyElementInCard(card);
+    const name = extractCompanyName(cel);
+    if (!name || name.length < 2) continue;
+    todo.push(card);
+  }
+
+  const concurrency = 3;
+  let wi = 0;
+  async function worker() {
+    while (true) {
+      const idx = wi++;
+      if (idx >= todo.length) return;
+      const card = todo[idx];
+      if (card?.isConnected) await processCard(card);
+    }
+  }
+  const n = Math.min(concurrency, Math.max(1, todo.length));
+  await Promise.all(Array.from({ length: n }, () => worker()));
+}
+
+function scheduleClassification() {
+  if (!isClassificationTargetPage()) return;
+  if (classifyDebounce) clearTimeout(classifyDebounce);
+  classifyDebounce = setTimeout(() => {
+    classifyDebounce = null;
+    void runClassificationPass();
+  }, 140);
+}
+
 let bannerEl = null;
 let lastLogAt = 0;
 const LOG_INTERVAL_MS = 45000;
@@ -197,8 +329,12 @@ function renderBanner(payload) {
     payload.sampleCompanies && payload.sampleCompanies.length
       ? payload.sampleCompanies.join(' · ')
       : '—';
+  const modeLine = isClassificationTargetPage()
+    ? '<div class="pn-mode">Badges SS2I / Client actifs sur cette page.</div>'
+    : '<div class="pn-mode pn-mode--muted">Badges SS2I / Client : pages Recherche ou Collections uniquement.</div>';
   el.innerHTML = `
     <div class="pn-title">Prospection</div>
+    ${modeLine}
     <div class="pn-stats">${payload.cardCount} carte(s) détectée(s) · ${payload.companyCount} entreprise(s)</div>
     <div class="pn-samples">${samples}</div>
   `;
@@ -221,9 +357,14 @@ function sendHeartbeat(payload, forceLog) {
 }
 
 function tick() {
+  applyPathMarkerClass();
+  if (location.pathname !== lastPath) {
+    lastPath = location.pathname;
+  }
   const payload = buildScanPayload();
   renderBanner(payload);
   sendHeartbeat(payload, false);
+  scheduleClassification();
 }
 
 let scheduled = false;
@@ -243,5 +384,15 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') scheduleTick();
 });
 
+lastPath = location.pathname;
+applyPathMarkerClass();
 scheduleTick();
 sendHeartbeat(buildScanPayload(), true);
+
+setInterval(() => {
+  if (location.pathname !== lastPath) {
+    lastPath = location.pathname;
+    applyPathMarkerClass();
+    scheduleTick();
+  }
+}, 800);

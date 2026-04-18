@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Prospection",
-  "version": "0.1.0",
-  "description": "LinkedIn Jobs — scan liste, journalisation Supabase ; Gemini & HubSpot configurés dans la popup.",
+  "version": "0.2.0",
+  "description": "LinkedIn Jobs — badges SS2I / Client (Gemini), cache Supabase, HubSpot en option.",
   "permissions": ["storage"],
   "host_permissions": [
     "https://www.linkedin.com/*",

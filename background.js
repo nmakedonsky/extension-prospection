@@ -3,8 +3,16 @@
  */
 
 const STORAGE_KEY_CONFIG = 'config';
+const STORAGE_KEY_COMPANIES = 'prospectionCompaniesCache';
 const SUPABASE_LOGS_TABLE = 'extension_logs';
+const SUPABASE_COMPANIES_TABLE = 'companies';
 const EXTENSION_SOURCE = 'extension-prospection-next';
+
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+/** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
+const inflightClassify = new Map();
 
 /**
  * @returns {Promise<{ geminiApiKey?: string, supabaseUrl?: string, supabaseAnonKey?: string, hubspotApiKey?: string, hubspotRegion?: string }>}
@@ -81,6 +89,170 @@ async function testHubSpot(apiKey, region) {
     return { ok: false, error: text.slice(0, 500) || `HTTP ${res.status}` };
   }
   return { ok: true };
+}
+
+async function getGeminiApiKey() {
+  const c = await loadConfig();
+  const k = String(c.geminiApiKey || '').trim();
+  return k || null;
+}
+
+/**
+ * @param {string} companyName
+ * @returns {Promise<'Client'|'SS2I'>}
+ */
+async function classifyCompanyWithGemini(companyName) {
+  const apiKey = await getGeminiApiKey();
+  if (!apiKey) {
+    throw new Error('Clé API Gemini non configurée.');
+  }
+
+  const prompt = `Tu es un expert en classification d'entreprises françaises.
+Pour l'entreprise donnée, réponds UNIQUEMENT par un des deux mots suivants :
+- SS2I : si c'est une ESN, SS2I, cabinet de conseil, ou société de services
+- Client : si c'est une entreprise client finale (industrie, banque, retail, etc.)
+
+Entreprise : "${companyName}"`;
+
+  const requestBody = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0, maxOutputTokens: 20 }
+  };
+
+  let lastError = null;
+  for (const model of GEMINI_MODELS) {
+    try {
+      const url = `${GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        lastError = new Error(`Gemini ${model} ${response.status}: ${text.slice(0, 200)}`);
+        continue;
+      }
+      const data = JSON.parse(text);
+      const out = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!out) {
+        lastError = new Error(`Réponse vide (${model})`);
+        continue;
+      }
+      const normalized = out.trim().toLowerCase();
+      if (normalized.includes('client')) return 'Client';
+      if (normalized.includes('ss2i') || normalized.includes('esn') || normalized.includes('consulting')) {
+        return 'SS2I';
+      }
+      return 'SS2I';
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error('Tous les modèles Gemini ont échoué');
+}
+
+async function getCompanyFromSupabase(companyName) {
+  const config = await loadConfig();
+  const url = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
+  const key = String(config.supabaseAnonKey || '').trim();
+  if (!url || !key) return null;
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/${SUPABASE_COMPANIES_TABLE}?company_name=eq.${encodeURIComponent(companyName)}&select=type`,
+      {
+        method: 'GET',
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    const t = rows?.[0]?.type;
+    return t === 'Client' || t === 'SS2I' ? t : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function upsertCompanyToSupabase(companyName, type) {
+  const config = await loadConfig();
+  const url = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
+  const key = String(config.supabaseAnonKey || '').trim();
+  if (!url || !key) return;
+  try {
+    const res = await fetch(`${url}/rest/v1/${SUPABASE_COMPANIES_TABLE}?on_conflict=company_name`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal'
+      },
+      body: JSON.stringify({
+        company_name: companyName,
+        type,
+        updated_at: new Date().toISOString()
+      })
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      console.warn('[Prospection BG] Supabase companies:', res.status, t.slice(0, 200));
+    }
+  } catch (e) {
+    console.warn('[Prospection BG] Supabase upsert:', e);
+  }
+}
+
+/**
+ * Cache local → Supabase → Gemini ; dédoublonne les appels en cours par nom d’entreprise.
+ * @param {string} companyName
+ * @returns {Promise<'Client'|'SS2I'|null>}
+ */
+async function getOrClassifyCompany(companyName) {
+  const trimmed = String(companyName || '').trim();
+  if (!trimmed) return null;
+
+  const stored = await chrome.storage.local.get(STORAGE_KEY_COMPANIES);
+  const companies = stored[STORAGE_KEY_COMPANIES] || {};
+  if (companies[trimmed] === 'Client' || companies[trimmed] === 'SS2I') {
+    upsertCompanyToSupabase(trimmed, companies[trimmed]).catch(() => {});
+    return companies[trimmed];
+  }
+
+  const fromDb = await getCompanyFromSupabase(trimmed);
+  if (fromDb) {
+    companies[trimmed] = fromDb;
+    await chrome.storage.local.set({ [STORAGE_KEY_COMPANIES]: companies });
+    return fromDb;
+  }
+
+  if (inflightClassify.has(trimmed)) {
+    return inflightClassify.get(trimmed);
+  }
+
+  const task = (async () => {
+    try {
+      const type = await classifyCompanyWithGemini(trimmed);
+      await upsertCompanyToSupabase(trimmed, type);
+      const r2 = await chrome.storage.local.get(STORAGE_KEY_COMPANIES);
+      const c2 = r2[STORAGE_KEY_COMPANIES] || {};
+      c2[trimmed] = type;
+      await chrome.storage.local.set({ [STORAGE_KEY_COMPANIES]: c2 });
+      return type;
+    } catch (e) {
+      console.warn('[Prospection BG] Classification:', trimmed, e?.message || e);
+      return null;
+    } finally {
+      inflightClassify.delete(trimmed);
+    }
+  })();
+
+  inflightClassify.set(trimmed, task);
+  return task;
 }
 
 function sanitizeJsonValue(value, depth = 0) {
@@ -190,6 +362,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     testHubSpot(msg.hubspotApiKey, msg.hubspotRegion)
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    return true;
+  }
+
+  if (msg.type === 'CLASSIFY_COMPANY') {
+    const name = String(msg.companyName || '').trim();
+    if (!name) {
+      sendResponse(null);
+      return false;
+    }
+    getOrClassifyCompany(name)
+      .then((type) => sendResponse(type))
+      .catch(() => sendResponse(null));
     return true;
   }
 
