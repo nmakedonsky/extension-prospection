@@ -75,14 +75,11 @@ CREATE POLICY "Allow anon read and write saved_jobs"
   USING (true)
   WITH CHECK (true);
 
--- Colonnes d'enrichissement financier (FMP + LLM)
--- fmp_payload : document JSON (cache pipeline) ; incl. raw.fmp_snapshot = brut FMP agrégé
--- (profil, ratios, flux, comptes sur plusieurs exercices). Ordre de grandeur typique : < ~500 ko / ligne.
+-- Colonnes d'enrichissement financier (pipeline LLM uniquement)
+-- financial_pipeline_cache : entrée complète du pipeline (data, unified, raw llm, companySummary…)
 ALTER TABLE companies
-  ADD COLUMN IF NOT EXISTS fmp_payload JSONB,
-  ADD COLUMN IF NOT EXISTS fmp_updated_at TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS fmp_provider TEXT,
-  ADD COLUMN IF NOT EXISTS fmp_status TEXT,
+  ADD COLUMN IF NOT EXISTS financial_pipeline_cache JSONB,
+  ADD COLUMN IF NOT EXISTS financial_pipeline_cache_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS llm_payload JSONB,
   ADD COLUMN IF NOT EXISTS llm_updated_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS llm_confidence NUMERIC,
@@ -96,9 +93,7 @@ ALTER TABLE companies
 -- Brut par fournisseur (extensible : ajouter une clé sans migration de colonnes)
 -- Convention JSON (financial_providers) :
 --   _schema_version: entier (incrémenter si la forme des blocs change)
---   <provider_key>: { provider_id, label, fetched_at, status, data }
--- Clés actuelles : financialmodelingprep, brave_search, gemini_financial_extraction
--- Nouveaux fournisseurs : nouvelle clé + même structure { provider_id, label, fetched_at, status, data }
+--   gemini_financial_extraction: { provider_id, label, fetched_at, status, data }
 ALTER TABLE companies
   ADD COLUMN IF NOT EXISTS financial_providers JSONB;
 

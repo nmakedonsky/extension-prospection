@@ -238,6 +238,7 @@ async function loadApiFields() {
   $('hubspotKey').value = config.hubspotApiKey || '';
   const region = String(config.hubspotRegion || 'eu').toLowerCase();
   $('hubspotRegion').value = region === 'us' ? 'us' : 'eu';
+  $('sendPilotKey').value = config.sendPilotApiKey || '';
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -336,6 +337,35 @@ document.addEventListener('DOMContentLoaded', () => {
         setStatus(el, 'HubSpot : connexion OK.', 'ok');
       } else {
         setStatus(el, `HubSpot : échec — ${r.error || 'erreur inconnue'}`, 'err');
+      }
+    } catch (e) {
+      setStatus(el, String(e.message || e), 'err');
+    }
+  });
+
+  $('saveSendPilot').addEventListener('click', async () => {
+    const el = $('sendPilotStatus');
+    try {
+      await saveConfig({ sendPilotApiKey: $('sendPilotKey').value.trim() });
+      setStatus(el, 'SendPilot : configuration enregistrée.', 'ok');
+    } catch (e) {
+      setStatus(el, String(e.message || e), 'err');
+    }
+  });
+
+  $('testSendPilot').addEventListener('click', async () => {
+    const el = $('sendPilotStatus');
+    setStatus(el, 'Test en cours…', '');
+    try {
+      const r = await sendTest('TEST_SENDPILOT', { sendPilotApiKey: $('sendPilotKey').value.trim() });
+      if (r.ok) {
+        const hint =
+          r.meta && typeof r.meta.campaignsHint === 'number'
+            ? ` (${r.meta.campaignsHint} campagne(s) visibles)`
+            : '';
+        setStatus(el, `SendPilot : connexion OK${hint}.`, 'ok');
+      } else {
+        setStatus(el, `SendPilot : échec — ${r.error || 'erreur inconnue'}`, 'err');
       }
     } catch (e) {
       setStatus(el, String(e.message || e), 'err');

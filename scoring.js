@@ -24,7 +24,7 @@
     return clamp01(t) * 100;
   }
 
-  /** CA / salarié (k€ ou k$ — même unité que FMP / LLM) */
+  /** CA / salarié (k€ ou k$ — même unité que les extractions LLM) */
   function normRevenuePerEmployee(kPerEmp) {
     return normLinear(kPerEmp, 25, 400);
   }

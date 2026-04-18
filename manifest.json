@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Prospection",
-  "version": "0.5.5",
-  "description": "LinkedIn Jobs — badges SS2I / Client (Gemini), cache Supabase, HubSpot en option.",
+  "version": "0.5.6",
+  "description": "LinkedIn Jobs — badges SS2I / Client (Gemini), cache Supabase, HubSpot / SendPilot en option.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
     "https://www.linkedin.com/*",
@@ -10,7 +10,8 @@
     "https://generativelanguage.googleapis.com/*",
     "https://*.supabase.co/*",
     "https://api.hubapi.com/*",
-    "https://api-eu1.hubapi.com/*"
+    "https://api-eu1.hubapi.com/*",
+    "https://api.sendpilot.ai/*"
   ],
   "action": {
     "default_popup": "popup.html",

@@ -81,8 +81,8 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
 
   if (!forceRefresh) {
     const supabaseFinancial = await swGetFinancialFromSupabase(companyName);
-    const payload = supabaseFinancial?.fmp_payload;
-    const updatedAtIso = supabaseFinancial?.fmp_updated_at;
+    const payload = supabaseFinancial?.financial_pipeline_cache;
+    const updatedAtIso = supabaseFinancial?.financial_pipeline_cache_at;
     const updatedAt = updatedAtIso ? new Date(updatedAtIso).getTime() : null;
     if (payload?.data && updatedAt && Date.now() - updatedAt < SW_FINANCIAL_CACHE_TTL_MS) {
       let companySummary = payload.companySummary ?? null;

@@ -5,7 +5,7 @@
 const SW_SUPABASE_COMPANIES_TABLE = 'companies';
 
 /** Schéma extensible financial_providers (JSONB) — incrémenter si la forme des blocs change */
-const FINANCIAL_PROVIDERS_SCHEMA_VERSION = 1;
+const FINANCIAL_PROVIDERS_SCHEMA_VERSION = 2;
 
 function sanitizeForPostgres(value) {
   if (value == null) return value;
@@ -32,20 +32,6 @@ function buildFinancialProvidersFromEntry(entry) {
 
   return {
     _schema_version: FINANCIAL_PROVIDERS_SCHEMA_VERSION,
-    financialmodelingprep: {
-      provider_id: 'financialmodelingprep',
-      label: 'Financial Modeling Prep',
-      fetched_at: ts,
-      status: 'not_used',
-      data: { note: 'Désactivé : pipeline Gemini uniquement (contexte carte job).' }
-    },
-    brave_search: {
-      provider_id: 'brave_search',
-      label: 'Brave Search',
-      fetched_at: ts,
-      status: 'not_used',
-      data: { note: 'Désactivé : pas d’appel API web.' }
-    },
     gemini_financial_extraction: {
       provider_id: 'google_gemini',
       label: 'Gemini (extraction financière)',
@@ -58,6 +44,8 @@ function buildFinancialProvidersFromEntry(entry) {
 
 function mergeFinancialProviders(existing, fromEntry) {
   const base = existing && typeof existing === 'object' ? { ...existing } : {};
+  delete base.financialmodelingprep;
+  delete base.brave_search;
   const built = buildFinancialProvidersFromEntry(fromEntry);
   return sanitizeForPostgres({ ...base, ...built });
 }
@@ -70,7 +58,7 @@ async function swGetFinancialFromSupabase(companyName) {
 
   try {
     const res = await fetch(
-      `${url}/rest/v1/${SW_SUPABASE_COMPANIES_TABLE}?company_name=eq.${encodeURIComponent(companyName)}&select=fmp_payload,fmp_updated_at,mode,unified_payload,score,confidence,sources_count,financial_providers&limit=1`,
+      `${url}/rest/v1/${SW_SUPABASE_COMPANIES_TABLE}?company_name=eq.${encodeURIComponent(companyName)}&select=financial_pipeline_cache,financial_pipeline_cache_at,mode,unified_payload,score,confidence,sources_count,financial_providers&limit=1`,
       {
         method: 'GET',
         headers: {
@@ -122,10 +110,8 @@ async function swUpsertFinancialToSupabase(companyName, entry) {
 
     const llmBlob = entry?.raw?.llmExtraction ?? null;
     const financialFields = {
-      fmp_payload: sanitizeForPostgres(entry),
-      fmp_updated_at: new Date(entry.updatedAt).toISOString(),
-      fmp_provider: 'google_gemini',
-      fmp_status: 'ok',
+      financial_pipeline_cache: sanitizeForPostgres(entry),
+      financial_pipeline_cache_at: new Date(entry.updatedAt).toISOString(),
       llm_payload: sanitizeForPostgres(llmBlob),
       llm_updated_at: llmBlob ? new Date(entry.updatedAt).toISOString() : null,
       llm_confidence: Number.isFinite(Number(llmBlob?.confidence ?? llmBlob?.globalConfidence))

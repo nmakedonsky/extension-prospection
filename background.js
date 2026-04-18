@@ -27,8 +27,10 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 /** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
 const inflightClassify = new Map();
 
+const SENDPILOT_API_BASE = 'https://api.sendpilot.ai/v1';
+
 /**
- * @returns {Promise<{ geminiApiKey?: string, supabaseUrl?: string, supabaseAnonKey?: string, hubspotApiKey?: string, hubspotRegion?: string }>}
+ * @returns {Promise<{ geminiApiKey?: string, supabaseUrl?: string, supabaseAnonKey?: string, hubspotApiKey?: string, hubspotRegion?: string, sendPilotApiKey?: string }>}
  */
 async function loadConfig() {
   const r = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
@@ -102,6 +104,36 @@ async function testHubSpot(apiKey, region) {
     return { ok: false, error: text.slice(0, 500) || `HTTP ${res.status}` };
   }
   return { ok: true };
+}
+
+/**
+ * Liste des campagnes (lecture seule) — vérifie la clé SendPilot.
+ * @see https://docs.sendpilot.ai/api-reference/introduction
+ */
+async function testSendPilot(apiKey) {
+  const key = String(apiKey || '').trim();
+  if (!key) {
+    return { ok: false, error: 'Clé API SendPilot manquante.' };
+  }
+  const res = await fetch(`${SENDPILOT_API_BASE}/campaigns`, {
+    method: 'GET',
+    headers: {
+      'X-API-Key': key,
+      Accept: 'application/json'
+    }
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    return { ok: false, error: text.slice(0, 500) || `HTTP ${res.status}` };
+  }
+  let count = null;
+  try {
+    const data = JSON.parse(text);
+    if (Array.isArray(data)) count = data.length;
+    else if (data && Array.isArray(data.data)) count = data.data.length;
+    else if (data && typeof data.total === 'number') count = data.total;
+  } catch (_) {}
+  return { ok: true, meta: count != null ? { campaignsHint: count } : undefined };
 }
 
 async function getGeminiApiKey() {
@@ -426,6 +458,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'TEST_HUBSPOT') {
     testHubSpot(msg.hubspotApiKey, msg.hubspotRegion)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    return true;
+  }
+
+  if (msg.type === 'TEST_SENDPILOT') {
+    testSendPilot(msg.sendPilotApiKey)
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
     return true;

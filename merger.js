@@ -5,8 +5,8 @@
     return Number.isNaN(n) ? null : n;
   }
 
-  function mergeFinancials(fmpFinancials, llmFinancials) {
-    const base = { ...(fmpFinancials || {}) };
+  function mergeFinancials(baseFinancials, llmFinancials) {
+    const base = { ...(baseFinancials || {}) };
     const out = { ...base };
     const keys = [
       'revenue',
