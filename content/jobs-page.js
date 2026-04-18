@@ -98,7 +98,9 @@ function isInLeftJobListColumn(el) {
  */
 function isNodeInJobDetailsComposed(el) {
   if (!el) return false;
-  const relaxWeakDetailSignals = isJobsCollectionsPath() && isInLeftJobListColumn(el);
+  const relaxWeakDetailSignals =
+    (isJobsCollectionsPath() || String(location.pathname || '').includes('/jobs/search-results')) &&
+    isInLeftJobListColumn(el);
   let n = el;
   while (n) {
     if (n.nodeType === 1) {
@@ -615,6 +617,14 @@ setInterval(() => {
     scheduleTick();
   }
 }, 800);
+
+try {
+  window.__prospectionJobs = {
+    isNodeInJobDetailsComposed,
+    isJobsCollectionsPath,
+    isInLeftJobListColumn
+  };
+} catch (_) {}
 
 try {
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

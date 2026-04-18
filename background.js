@@ -1,6 +1,15 @@
 /**
  * Service worker — tests de connexion + journalisation optionnelle (Supabase).
  */
+importScripts(
+  'modeDetector.js',
+  'merger.js',
+  'scoring.js',
+  'llmExtractor.js',
+  'financialPipeline.js',
+  'financial-gemini-context.js',
+  'sw-financial.js'
+);
 
 const STORAGE_KEY_CONFIG = 'config';
 const STORAGE_KEY_COMPANIES = 'prospectionCompaniesCache';
@@ -424,6 +433,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       })
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    return true;
+  }
+
+  if (msg.action === 'getFinancialData') {
+    const name = String(msg.companyName || '').trim();
+    if (!name) {
+      sendResponse({ ok: false, error: 'Nom manquant' });
+      return false;
+    }
+    swGetFinancialData(name, !!msg.forceRefresh, msg.companyContext || null)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
+    return true;
+  }
+
+  if (msg.action === 'checkHubSpotCompany') {
+    swCheckHubSpotCompany(String(msg.companyName || '').trim())
+      .then((r) => sendResponse(r))
+      .catch(() => sendResponse({ exists: false, configured: false }));
+    return true;
+  }
+
+  if (msg.action === 'addToHubSpot') {
+    swAddToHubSpot(
+      String(msg.companyName || '').trim(),
+      msg.type,
+      msg.jobTitle || '',
+      msg.jobUrl || ''
+    )
+      .then((data) => sendResponse({ ok: true, id: data?.id, updated: !!data?.updated }))
+      .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
     return true;
   }
 
