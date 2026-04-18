@@ -20,15 +20,19 @@ function installFinancialPanelJobSelection() {
       const companyEl = findCompanyElementInCardDock(wrapper);
       const companyName = companyEl ? extractCompanyNameDock(companyEl) : '';
       if (!companyName) return;
-      const { jobTitle, jobUrl } = getJobInfoFromWrapper(wrapper);
-      const companyContext = buildCompanyContextForWrapper(wrapper, companyName);
-      populateFinancialPanel(companyName, {
-        type: t,
-        jobTitle,
-        jobUrl,
-        companyContext,
-        jobWrapper: wrapper
-      });
+      void (async () => {
+        const ens = await ensureCompanyMatchContext(wrapper, companyName);
+        const { jobTitle, jobUrl } = getJobInfoFromWrapper(wrapper);
+        populateFinancialPanel(companyName, {
+          type: t,
+          jobTitle,
+          jobUrl,
+          companyContext: ens.context,
+          matchContextOk: ens.ok,
+          matchContextMissing: ens.missing,
+          jobWrapper: wrapper
+        });
+      })();
     },
     true
   );

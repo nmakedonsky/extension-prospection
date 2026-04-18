@@ -3,7 +3,8 @@
 let lastFinancialCardJobWrapper = null;
 
 function populateFinancialPanel(companyName, jobInfo = {}) {
-  const { type, jobTitle, jobUrl, companyContext, jobWrapper } = jobInfo;
+  const { type, jobTitle, jobUrl, companyContext, jobWrapper, matchContextOk, matchContextMissing } =
+    jobInfo;
   lastFinancialCardJobWrapper = jobWrapper && jobWrapper.isConnected ? jobWrapper : null;
 
   ensureFinancialDock();
@@ -163,27 +164,49 @@ function populateFinancialPanel(companyName, jobInfo = {}) {
     financialBtn.disabled = true;
     financialBtn.textContent = '…';
     financialStatus.textContent = '';
-    sendRuntimeMessageSafe(
-      { action: 'getFinancialData', companyName, forceRefresh: true, companyContext: companyContext || null },
-      (response, error) => {
-        if (error) {
+    void (async () => {
+      let ctx = companyContext || null;
+      if (lastFinancialCardJobWrapper && typeof ensureCompanyMatchContext === 'function') {
+        const ens = await ensureCompanyMatchContext(lastFinancialCardJobWrapper, companyName);
+        ctx = ens.context;
+        if (!ens.ok) {
           financialBtn.disabled = false;
           financialBtn.textContent = 'Réessayer';
-          financialStatus.textContent = 'Erreur de communication';
+          const miss = (ens.missing || []).join(', ');
+          financialStatus.textContent = miss
+            ? `Carte incomplète (${miss}). Réessayez après chargement de la page.`
+            : 'Carte incomplète — réessayez.';
           financialStatus.classList.add('lph-financial-card__financial-status--warn');
           return;
         }
-        if (!response?.ok || !response.data) {
-          financialBtn.disabled = false;
-          financialBtn.textContent = 'Réessayer';
-          financialStatus.textContent = response?.error || 'Données indisponibles';
-          financialStatus.classList.add('lph-financial-card__financial-status--warn');
-          return;
-        }
-        financialBtn.disabled = false;
-        applyFinancialResponse(response);
       }
-    );
+      sendRuntimeMessageSafe(
+        { action: 'getFinancialData', companyName, forceRefresh: true, companyContext: ctx },
+        (response, error) => {
+          if (error) {
+            financialBtn.disabled = false;
+            financialBtn.textContent = 'Réessayer';
+            financialStatus.textContent = 'Erreur de communication';
+            financialStatus.classList.add('lph-financial-card__financial-status--warn');
+            return;
+          }
+          if (!response?.ok || !response.data) {
+            financialBtn.disabled = false;
+            financialBtn.textContent = 'Réessayer';
+            if (response?.code === 'MATCH_CONTEXT' && response?.missing?.length) {
+              financialStatus.textContent =
+                'Contexte incomplet : ' + response.missing.join(', ');
+            } else {
+              financialStatus.textContent = response?.error || 'Données indisponibles';
+            }
+            financialStatus.classList.add('lph-financial-card__financial-status--warn');
+            return;
+          }
+          financialBtn.disabled = false;
+          applyFinancialResponse(response);
+        }
+      );
+    })();
   });
 
   hubspotBtn.addEventListener('click', (e) => {
@@ -212,10 +235,22 @@ function populateFinancialPanel(companyName, jobInfo = {}) {
     );
   });
 
+  if (matchContextOk === false && (matchContextMissing || []).length) {
+    financialStatus.textContent =
+      'Carte incomplète : ' + matchContextMissing.join(', ') + ' — cache uniquement si disponible.';
+    financialStatus.classList.add('lph-financial-card__financial-status--warn');
+  }
+
   sendRuntimeMessageSafe(
     { action: 'getFinancialData', companyName, forceRefresh: false, companyContext: companyContext || null },
     (response, error) => {
       if (error || !financialStatus.isConnected) return;
+      if (!response?.ok && response?.code === 'MATCH_CONTEXT') {
+        financialStatus.textContent =
+          'Contexte incomplet : ' + (response.missing || []).join(', ');
+        financialStatus.classList.add('lph-financial-card__financial-status--warn');
+        return;
+      }
       if (applyFinancialResponse(response)) {
         financialStatus.classList.remove('lph-financial-card__financial-status--warn');
       }

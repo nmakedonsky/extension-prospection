@@ -120,6 +120,11 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
     }
   }
 
+  const matchCheck = swValidateMatchContext(companyContext);
+  if (!matchCheck.ok) {
+    throw new Error('CONTEXTE_MATCH_INCOMPLET:' + JSON.stringify({ missing: matchCheck.missing }));
+  }
+
   const pipeline = await self.financialPipeline.runAdaptiveFinancialPipeline(
     companyName,
     {
@@ -141,8 +146,11 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
     revenue_per_employee: unified.financials?.revenue_per_employee ?? null
   };
 
+  const llmRaw = pipeline?.raw?.llm || {};
   const identificationNotes =
-    (pipeline?.raw?.llm && pipeline.raw.llm.identification_notes) || '';
+    typeof llmRaw.identification_notes === 'string' ? llmRaw.identification_notes : '';
+  const identifiedCompanyName =
+    typeof llmRaw.identified_company_name === 'string' ? llmRaw.identified_company_name.trim() : '';
 
   let companySummary = null;
   try {
@@ -150,7 +158,8 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
       companyName,
       companyContext,
       geminiApiKey,
-      typeof identificationNotes === 'string' ? identificationNotes : ''
+      identificationNotes,
+      identifiedCompanyName
     );
   } catch (e) {
     console.warn('[Prospection SW] Résumé entreprise (pipeline):', e?.message || e);

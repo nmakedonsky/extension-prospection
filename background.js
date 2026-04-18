@@ -7,6 +7,7 @@ importScripts(
   'scoring.js',
   'llmExtractor.js',
   'financialPipeline.js',
+  'sw-company-match-prompt.js',
   'financial-gemini-context.js',
   'sw-company-summary.js',
   'sw-supabase-financial.js',
@@ -446,7 +447,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     swGetFinancialData(name, !!msg.forceRefresh, msg.companyContext || null)
       .then((result) => sendResponse({ ok: true, ...result }))
-      .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
+      .catch((err) => {
+        const msgStr = String(err && err.message ? err.message : err);
+        if (msgStr.startsWith('CONTEXTE_MATCH_INCOMPLET:')) {
+          try {
+            const parsed = JSON.parse(msgStr.slice('CONTEXTE_MATCH_INCOMPLET:'.length));
+            sendResponse({
+              ok: false,
+              error: 'Contexte de matching incomplet.',
+              missing: parsed.missing,
+              code: 'MATCH_CONTEXT'
+            });
+            return;
+          } catch (_) {}
+        }
+        sendResponse({ ok: false, error: msgStr });
+      });
     return true;
   }
 

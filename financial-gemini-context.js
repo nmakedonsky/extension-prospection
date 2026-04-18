@@ -1,6 +1,6 @@
 /**
- * Extraction financière via Gemini à partir du contexte LinkedIn (logo, URL société, lieu).
- * Chargé par importScripts avant sw-financial.js
+ * Extraction financière via Gemini à partir du contexte LinkedIn (logo image + texte).
+ * sw-company-match-prompt.js doit être chargé avant ce fichier.
  */
 const FGC_GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash'];
 const FGC_GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -17,22 +17,14 @@ function parseGeminiCandidateJson(data) {
   return JSON.parse(jsonSlice);
 }
 
-function buildFinancialExtractionFromContextPrompt(companyName, ctx) {
-  const logoUrl = ctx?.logoUrl || '';
-  const logoAlt = ctx?.logoAlt || '';
-  const li = ctx?.companyLinkedinUrl || '';
-  const loc = ctx?.jobLocation || '';
-  return `Tu es un analyste financier. Tu dois identifier l'entreprise réelle derrière l'offre LinkedIn, puis estimer les indicateurs financiers et signaux startup à partir de TES CONNAISSANCES PUBLIQUES (rapports annuels, presse, marchés, données cotées si applicable). Tu ne reçois pas d'articles : uniquement le contexte ci-dessous.
+/** Instructions + schéma JSON uniquement (le bloc matching est ajouté par swBuildGeminiPartsWithMatchContext). */
+function buildFinancialExtractionInstructions(companyName) {
+  return `Tu es un analyste financier. Tu dois identifier l'entreprise réelle correspondant au **contexte d'identification ci-dessus** (image logo éventuelle + texte), puis estimer les indicateurs financiers et signaux startup à partir de TES CONNAISSANCES PUBLIQUES (rapports annuels, presse, marchés, données cotées si applicable). Tu ne reçois pas d'articles : uniquement le contexte fourni.
 
-Contexte LinkedIn / affichage :
-- Nom affiché : "${companyName}"
-- Lieu du poste (si fourni) : "${loc}"
-- URL logo : "${logoUrl}"
-- Texte alt logo : "${logoAlt}"
-- URL page entreprise LinkedIn : "${li}"
+Référence nom pour les champs : "${String(companyName || '').replace(/"/g, '\\"')}"
 
 Étapes :
-1) Déduis quelle entreprise du monde réel correspond le mieux (homonymes, filiales : précise dans identification_notes).
+1) Déduis quelle entreprise du monde réel correspond le mieux au contexte (homonymes, filiales : précise dans identification_notes).
 2) Remplis les chiffres en millions de la devise principale (EUR pour une société européenne dominante, USD si société US dominante) ; indique la devise implicite dans identification_notes si utile.
 3) revenue = chiffre d'affaires annuel récent en millions (M€ / M$), sauf si tu dois utiliser le montant absolu en euros (> 1e9). employees = effectif (ETP) récent.
 4) revenuePerEmployee = uniquement le CA par employé en milliers (k€ ou k$ par tête), typiquement entre ~50 et ~800 pour les grands groupes — jamais en euros bruts par tête (pas 600000) ; sinon null.
@@ -80,9 +72,10 @@ Retourne UNIQUEMENT un JSON valide :
 
 async function extractFinancialFromCompanyContext(companyName, companyContext, geminiApiKey) {
   if (!geminiApiKey) return null;
-  const prompt = buildFinancialExtractionFromContextPrompt(companyName, companyContext || {});
+  const instruction = buildFinancialExtractionInstructions(companyName);
+  const parts = swBuildGeminiPartsWithMatchContext(companyName, companyContext || {}, instruction);
   const requestBody = {
-    contents: [{ parts: [{ text: prompt }] }],
+    contents: [{ parts }],
     generationConfig: {
       temperature: 0,
       maxOutputTokens: 2800

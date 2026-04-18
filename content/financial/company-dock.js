@@ -65,14 +65,3 @@ function getJobInfoFromWrapper(wrapper) {
     jobUrl
   };
 }
-
-function buildCompanyContextForWrapper(wrapper, companyName) {
-  const logoImg = wrapper.querySelector('img[alt*="Logo"], img[class*="EntityPhoto"]');
-  const companyLink = wrapper.querySelector('a[href*="/company/"]');
-  return {
-    logoUrl: logoImg?.src ? String(logoImg.src).trim() : null,
-    logoAlt: logoImg?.alt ? String(logoImg.alt).trim() : companyName ? `Logo de ${companyName}` : null,
-    companyLinkedinUrl: companyLink?.href ? String(companyLink.href).trim() : null,
-    jobLocation: null
-  };
-}
