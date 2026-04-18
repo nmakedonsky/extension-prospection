@@ -11,6 +11,7 @@ importScripts(
   'financial-gemini-context.js',
   'sw-company-summary.js',
   'sw-supabase-financial.js',
+  'sw-supabase-jobs.js',
   'sw-financial.js'
 );
 
@@ -510,6 +511,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     )
       .then((data) => sendResponse({ ok: true, id: data?.id, updated: !!data?.updated }))
       .catch((err) => sendResponse({ ok: false, error: String(err && err.message ? err.message : err) }));
+    return true;
+  }
+
+  if (msg.action === 'checkSavedJobsInSupabase') {
+    swCheckSavedJobsPresenceInSupabase(Array.isArray(msg.items) ? msg.items : [])
+      .then((present) => sendResponse({ ok: true, present }))
+      .catch((err) =>
+        sendResponse({ ok: false, error: err?.message || String(err), present: {} })
+      );
+    return true;
+  }
+
+  if (msg.action === 'saveJobOffer') {
+    swSaveJobOffer(msg.jobOffer || null)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 

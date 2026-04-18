@@ -7,6 +7,8 @@ const DATA_PROCESSED = 'data-pn-processed';
 const DATA_LOADING = 'data-pn-loading';
 const DATA_FAILED = 'data-pn-failed';
 const DATA_TYPE = 'data-pn-type';
+/** Carte : snapshot carte déjà envoyé (évite doublons saveJobOffer stage=card). */
+const DATA_JOB_CARD_SAVED = 'data-pn-job-card-saved';
 
 const JOB_CARD_SELECTORS = [
   'div[componentkey^="job-card-component-ref-"]',

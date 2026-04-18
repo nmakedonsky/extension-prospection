@@ -44,6 +44,11 @@ function extractCompanyName(el) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Clé stable **par offre d’emploi** (job LinkedIn), pas par entreprise.
+ * Sert au suivi « déjà ouvert / déjà aspiré » : deux offres chez le même client → deux clés distinctes.
+ * Ordre : data-job-id → componentkey → URL (currentJobId / jobs/view) → repli position (faible).
+ */
 function dedupeKeyForCard(card) {
   const dj =
     card.getAttribute?.('data-job-id') ||
@@ -63,4 +68,42 @@ function dedupeKeyForCard(card) {
     } catch (_) {}
   }
   return `pos:${card.getBoundingClientRect().top | 0}`;
+}
+
+function normalizeTextPn(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function getJobIdFromUrl(jobUrl) {
+  const value = String(jobUrl || '');
+  const viewMatch = value.match(/\/jobs\/view\/(\d+)/);
+  if (viewMatch?.[1]) return viewMatch[1];
+  const currentMatch = value.match(/[?&]currentJobId=(\d+)/);
+  if (currentMatch?.[1]) return currentMatch[1];
+  return null;
+}
+
+/** Extrait le jobId depuis un componentkey type "job-card-component-ref-4387926645". */
+function getJobIdFromComponentKey(el) {
+  const ck = el?.getAttribute?.('componentkey') || '';
+  const m = ck.match(/^job-card-component-ref-(\d+)$/);
+  return m ? m[1] : null;
+}
+
+function getJobIdFromWrapper(wrapper, jobUrl = '') {
+  const attrValue =
+    wrapper?.getAttribute?.('data-job-id') ||
+    wrapper?.getAttribute?.('data-occludable-job-id') ||
+    wrapper?.dataset?.jobId ||
+    wrapper?.dataset?.occludableJobId ||
+    '';
+  if (normalizeTextPn(attrValue)) return normalizeTextPn(attrValue);
+  const ckId = getJobIdFromComponentKey(wrapper);
+  if (ckId) return ckId;
+  return getJobIdFromUrl(jobUrl);
+}
+
+/** @returns {string|null} Alias explicite — même clé que `dedupeKeyForCard` (par offre). */
+function getDedupKeyForJobCard(wrapper) {
+  return dedupeKeyForCard(wrapper);
 }

@@ -61,6 +61,9 @@ async function processCard(card) {
     card.removeAttribute(DATA_FAILED);
     if (type === 'Client') {
       prefetchFinancialDataForClient(card, companyName);
+      try {
+        document.dispatchEvent(new CustomEvent('pn-client-classified', { detail: { card } }));
+      } catch (_) {}
     }
     const el = findCompanyElementInCard(card);
     if (el && !isNodeInJobDetailsComposed(el)) {

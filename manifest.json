@@ -43,6 +43,8 @@
         "content/financial/messaging.js",
         "content/financial/path-and-eligibility.js",
         "content/financial/company-dock.js",
+        "content/jobs/jobdesk-scrape.js",
+        "content/jobs/jobdesk-autoopen.js",
         "content/company-match-context.js",
         "content/financial/dock-shell.js",
         "content/financial/metrics-render.js",
