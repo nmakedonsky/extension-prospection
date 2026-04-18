@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prospection</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Prospection</h1>
+  <p class="subtitle">Squelette — connexions uniquement.</p>
+
+  <section class="block">
+    <h2>Gemini</h2>
+    <label for="geminiKey">Clé API (Google AI Studio)</label>
+    <input type="password" id="geminiKey" autocomplete="off" placeholder="AIza…">
+    <div class="row">
+      <button type="button" id="saveGemini" class="secondary">Enregistrer</button>
+      <button type="button" id="testGemini">Tester</button>
+    </div>
+    <p id="geminiStatus" class="status" aria-live="polite"></p>
+  </section>
+
+  <section class="block">
+    <h2>Supabase</h2>
+    <label for="supabaseUrl">URL du projet</label>
+    <input type="text" id="supabaseUrl" autocomplete="off" placeholder="https://….supabase.co">
+    <label for="supabaseKey">Clé anon</label>
+    <input type="password" id="supabaseKey" autocomplete="off" placeholder="eyJ…">
+    <div class="row">
+      <button type="button" id="saveSupabase" class="secondary">Enregistrer</button>
+      <button type="button" id="testSupabase">Tester</button>
+    </div>
+    <p id="supabaseStatus" class="status" aria-live="polite"></p>
+  </section>
+
+  <section class="block">
+    <h2>HubSpot</h2>
+    <label for="hubspotRegion">Région API</label>
+    <select id="hubspotRegion">
+      <option value="eu">EU (api-eu1.hubapi.com)</option>
+      <option value="us">US (api.hubapi.com)</option>
+    </select>
+    <label for="hubspotKey">Clé Private App</label>
+    <input type="password" id="hubspotKey" autocomplete="off" placeholder="pat-… ou eu1-…">
+    <div class="row">
+      <button type="button" id="saveHubspot" class="secondary">Enregistrer</button>
+      <button type="button" id="testHubspot">Tester</button>
+    </div>
+    <p id="hubspotStatus" class="status" aria-live="polite"></p>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

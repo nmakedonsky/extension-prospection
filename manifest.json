@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Prospection (squelette)",
+  "version": "0.0.1",
+  "description": "Squelette — connexions Gemini, Supabase, HubSpot uniquement.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*",
+    "https://*.supabase.co/*",
+    "https://api.hubapi.com/*",
+    "https://api-eu1.hubapi.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Prospection"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
