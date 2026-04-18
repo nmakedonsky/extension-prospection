@@ -225,6 +225,11 @@ async function getOrClassifyCompany(companyName) {
 
   const fromDb = await getCompanyFromSupabase(trimmed);
   if (fromDb) {
+    void logToSupabase('company_classified', {
+      company_name: trimmed.slice(0, 120),
+      type: fromDb,
+      via: 'supabase'
+    });
     companies[trimmed] = fromDb;
     await chrome.storage.local.set({ [STORAGE_KEY_COMPANIES]: companies });
     return fromDb;
@@ -237,6 +242,11 @@ async function getOrClassifyCompany(companyName) {
   const task = (async () => {
     try {
       const type = await classifyCompanyWithGemini(trimmed);
+      void logToSupabase('company_classified', {
+        company_name: trimmed.slice(0, 120),
+        type,
+        via: 'gemini'
+      });
       await upsertCompanyToSupabase(trimmed, type);
       const r2 = await chrome.storage.local.get(STORAGE_KEY_COMPANIES);
       const c2 = r2[STORAGE_KEY_COMPANIES] || {};
@@ -245,6 +255,14 @@ async function getOrClassifyCompany(companyName) {
       return type;
     } catch (e) {
       console.warn('[Prospection BG] Classification:', trimmed, e?.message || e);
+      void logToSupabase(
+        'classification_failed',
+        {
+          company_name: trimmed.slice(0, 120),
+          error: String(e?.message || e).slice(0, 500)
+        },
+        'warn'
+      );
       return null;
     } finally {
       inflightClassify.delete(trimmed);
@@ -276,8 +294,9 @@ function sanitizeJsonValue(value, depth = 0) {
 /**
  * @param {string} event
  * @param {Record<string, unknown>} data
+ * @param {'info'|'warn'|'error'} [level]
  */
-async function postExtensionLog(event, data) {
+async function postExtensionLog(event, data, level = 'info') {
   const config = await loadConfig();
   const supabaseUrl = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
   const supabaseKey = String(config.supabaseAnonKey || '').trim();
@@ -290,9 +309,11 @@ async function postExtensionLog(event, data) {
   delete rest.pageUrl;
   delete rest.tabId;
 
+  const safeLevel = level === 'warn' || level === 'error' ? level : 'info';
+
   const body = {
     source: EXTENSION_SOURCE,
-    level: 'info',
+    level: safeLevel,
     event: String(event || 'event').slice(0, 200),
     data: sanitizeJsonValue(rest),
     sender: null,
@@ -319,6 +340,10 @@ async function postExtensionLog(event, data) {
     return { ok: false, error: t.slice(0, 400) || `HTTP ${res.status}` };
   }
   return { ok: true };
+}
+
+function logToSupabase(event, data, level) {
+  return postExtensionLog(event, data, level || 'info').catch(() => {});
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

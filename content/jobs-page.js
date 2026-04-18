@@ -1,8 +1,7 @@
 /**
- * LinkedIn Jobs — liste gauche, barre d’état, badges SS2I / Client (search-results & collections).
+ * LinkedIn Jobs — badges SS2I / Client (search-results & collections).
+ * Télémétrie : heartbeat vers Supabase uniquement (pas d’UI sur la page).
  */
-
-const EXT_ID = 'prospection-next';
 
 const DATA_PROCESSED = 'data-pn-processed';
 const DATA_LOADING = 'data-pn-loading';
@@ -310,35 +309,8 @@ function scheduleClassification() {
   }, 140);
 }
 
-let bannerEl = null;
 let lastLogAt = 0;
 const LOG_INTERVAL_MS = 45000;
-
-function ensureBanner() {
-  if (bannerEl?.isConnected) return bannerEl;
-  bannerEl = document.createElement('div');
-  bannerEl.id = 'prospection-next-banner';
-  bannerEl.setAttribute('data-extension', EXT_ID);
-  document.documentElement.appendChild(bannerEl);
-  return bannerEl;
-}
-
-function renderBanner(payload) {
-  const el = ensureBanner();
-  const samples =
-    payload.sampleCompanies && payload.sampleCompanies.length
-      ? payload.sampleCompanies.join(' · ')
-      : '—';
-  const modeLine = isClassificationTargetPage()
-    ? '<div class="pn-mode">Badges SS2I / Client actifs sur cette page.</div>'
-    : '<div class="pn-mode pn-mode--muted">Badges SS2I / Client : pages Recherche ou Collections uniquement.</div>';
-  el.innerHTML = `
-    <div class="pn-title">Prospection</div>
-    ${modeLine}
-    <div class="pn-stats">${payload.cardCount} carte(s) détectée(s) · ${payload.companyCount} entreprise(s)</div>
-    <div class="pn-samples">${samples}</div>
-  `;
-}
 
 function sendHeartbeat(payload, forceLog) {
   const now = Date.now();
@@ -362,7 +334,6 @@ function tick() {
     lastPath = location.pathname;
   }
   const payload = buildScanPayload();
-  renderBanner(payload);
   sendHeartbeat(payload, false);
   scheduleClassification();
 }
