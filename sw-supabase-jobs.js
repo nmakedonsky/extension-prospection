@@ -5,6 +5,7 @@
  */
 const SW_SUPABASE_JOBS_TABLE = 'saved_jobs';
 const STORAGE_KEY_JOB_OFFERS = 'pnJobOffersCache';
+const FORCE_RESCRAPE_CUTOFF_ISO = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
 
 function normalizeTextKey(value) {
   return String(value || '').trim().toLowerCase();
@@ -201,6 +202,8 @@ function swNormalizeJobUrlForSupabaseMatch(u) {
 function swSavedJobRowHasCompleteJobDesk(row) {
   if (!row) return false;
   if (row.needs_rescrape === true) return false;
+  const rowUpdatedAt = String(row.updated_at || row.details_scraped_at || row.created_at || '').trim();
+  if (!rowUpdatedAt || rowUpdatedAt < FORCE_RESCRAPE_CUTOFF_ISO) return false;
   const hasDetailsAt = row.details_scraped_at != null && String(row.details_scraped_at).trim() !== '';
   const hasDescription = row.description_text != null && String(row.description_text).trim().length > 0;
   return hasDetailsAt && hasDescription;
@@ -241,7 +244,7 @@ async function swCheckSavedJobsPresenceInSupabase(items) {
     const orQuery = orParts.join(',');
     try {
       const res = await fetch(
-        `${baseUrl}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?select=linkedin_job_id,job_url,details_scraped_at,description_text,needs_rescrape&or=(${orQuery})`,
+        `${baseUrl}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?select=linkedin_job_id,job_url,details_scraped_at,description_text,needs_rescrape,created_at,updated_at&or=(${orQuery})`,
         { method: 'GET', headers }
       );
       if (!res.ok) continue;

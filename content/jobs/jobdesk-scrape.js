@@ -9,6 +9,7 @@ const MAX_VISITED_JOB_DESK_KEYS = 4000;
 const JOB_SCRAPE_AFTER_OPEN_FIRST_DELAY_MS = 520;
 const JOB_SCRAPE_AFTER_OPEN_STEP_MS = 380;
 const JOB_SCRAPE_AFTER_OPEN_MAX_MS = 18000;
+const FORCE_RESCRAPE_CUTOFF_LOCAL_DAY_MS = new Date(new Date().setHours(0, 0, 0, 0)).getTime();
 
 const JOB_DETAIL_PANEL_SELECTORS = [
   '.jobs-search__job-details--container',
@@ -175,6 +176,47 @@ function buildJobDetailsPayload(wrapper) {
   };
 }
 
+function isElementVisible(el) {
+  if (!el) return false;
+  try {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const style = window.getComputedStyle(el);
+    if (!style) return true;
+    return style.display !== 'none' && style.visibility !== 'hidden';
+  } catch (_) {
+    return true;
+  }
+}
+
+function getJobDeskReadyState(payload) {
+  const detailsPanel = getJobDetailsPanel();
+  const metadataCount = Array.isArray(payload?.linkedinData?.details?.metadataItems)
+    ? payload.linkedinData.details.metadataItems.length
+    : 0;
+  const descriptionLength = String(payload?.descriptionText || '').trim().length;
+  const hasTitle = String(payload?.jobTitle || '').trim().length > 0;
+  const hasCompany = String(payload?.companyName || '').trim().length > 0;
+  return {
+    isReady:
+      !!payload &&
+      isElementVisible(detailsPanel) &&
+      hasCompany &&
+      hasTitle &&
+      descriptionLength > 0 &&
+      metadataCount >= 1,
+    signature: JSON.stringify([
+      payload?.linkedinJobId || '',
+      payload?.jobUrl || '',
+      payload?.jobTitle || '',
+      payload?.companyName || '',
+      payload?.location || '',
+      metadataCount,
+      descriptionLength
+    ])
+  };
+}
+
 function pnSaveJobOfferToBackground(jobOffer) {
   const fingerprint = JSON.stringify([
     jobOffer.stage || '',
@@ -182,6 +224,7 @@ function pnSaveJobOfferToBackground(jobOffer) {
     jobOffer.jobUrl || '',
     jobOffer.companyName || '',
     jobOffer.jobTitle || '',
+    jobOffer.location || '',
     jobOffer.descriptionText || ''
   ]);
   if (fingerprint === lastSavedJobFingerprint) return;
@@ -195,17 +238,35 @@ function pnSaveJobOfferToBackground(jobOffer) {
 function scheduleJobOfferScrape(wrapper) {
   const started = Date.now();
   let finished = false;
+  let bestPayload = null;
+  let lastReadySignature = '';
+  let stableReadyCount = 0;
 
   const attempt = () => {
     if (finished) return;
     if (!wrapper?.isConnected) return;
     const payload = buildJobDetailsPayload(wrapper);
-    if (payload) {
+    if (payload) bestPayload = payload;
+
+    const { isReady, signature } = getJobDeskReadyState(payload);
+    if (isReady) {
+      stableReadyCount = signature === lastReadySignature ? stableReadyCount + 1 : 1;
+      lastReadySignature = signature;
+    } else {
+      stableReadyCount = 0;
+      lastReadySignature = '';
+    }
+
+    if (stableReadyCount >= 2 && payload) {
       finished = true;
       pnSaveJobOfferToBackground(payload);
       return;
     }
-    if (Date.now() - started >= JOB_SCRAPE_AFTER_OPEN_MAX_MS) return;
+    if (Date.now() - started >= JOB_SCRAPE_AFTER_OPEN_MAX_MS) {
+      finished = true;
+      if (bestPayload) pnSaveJobOfferToBackground(bestPayload);
+      return;
+    }
     window.setTimeout(attempt, JOB_SCRAPE_AFTER_OPEN_STEP_MS);
   };
 
@@ -223,9 +284,17 @@ function saveJobCardSnapshot(wrapper) {
 async function getVisitedJobDeskMap() {
   try {
     const r = await chrome.storage.local.get(STORAGE_KEY_JOB_DESK_VISITED);
-    return r[STORAGE_KEY_JOB_DESK_VISITED] && typeof r[STORAGE_KEY_JOB_DESK_VISITED] === 'object'
+    const raw = r[STORAGE_KEY_JOB_DESK_VISITED] && typeof r[STORAGE_KEY_JOB_DESK_VISITED] === 'object'
       ? r[STORAGE_KEY_JOB_DESK_VISITED]
       : {};
+    const filtered = {};
+    for (const [k, ts] of Object.entries(raw)) {
+      const n = Number(ts);
+      if (Number.isFinite(n) && n >= FORCE_RESCRAPE_CUTOFF_LOCAL_DAY_MS) {
+        filtered[k] = n;
+      }
+    }
+    return filtered;
   } catch (_) {
     return {};
   }
