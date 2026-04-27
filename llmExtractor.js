@@ -6,6 +6,17 @@
   }
 
   /**
+   * Prompt Gemini : montants en millions (M€ / M$) sauf valeur absolue ≥ 1e9 (unités pleines).
+   * Le dock et formatRevenueRaw attendent des euros (ou équivalent) absolus.
+   */
+  function llmMoneyToCanonicalEuros(v) {
+    if (v == null || !Number.isFinite(Number(v))) return null;
+    const x = Number(v);
+    if (Math.abs(x) >= 1e9) return x;
+    return x * 1e6;
+  }
+
+  /**
    * Prompt : revenue en millions (M€) sauf si ≥ 1e9 → CA annuel en € (unité pleine).
    * Sortie : k€ / tête (cohérent scoring ~25–400 pour la plupart des boîtes).
    */
@@ -28,7 +39,7 @@
   }
 
   function normalizeLlmFinancials(llm) {
-    const revenue = getValue(llm?.revenue);
+    const revenue = llmMoneyToCanonicalEuros(getValue(llm?.revenue));
     const employees = getValue(llm?.employees);
     const revenuePerEmployeeRaw =
       getValue(llm?.revenuePerEmployee) ??
@@ -40,7 +51,7 @@
       revenue: revenue ?? null,
       revenue_per_employee: revenuePerEmployee,
       employees: Number.isFinite(Number(employees)) ? Number(employees) : null,
-      ebitda: getValue(llm?.ebitda),
+      ebitda: llmMoneyToCanonicalEuros(getValue(llm?.ebitda)),
       ebitda_margin: getValue(llm?.ebitda_margin),
       net_margin: getValue(llm?.net_margin),
       gross_margin: getValue(llm?.gross_margin),
@@ -49,14 +60,14 @@
       capex_to_revenue_pct: getValue(llm?.capex_to_revenue_pct),
       rnd_to_revenue_pct: getValue(llm?.rnd_to_revenue_pct),
       revenue_growth_3y_cagr: getValue(llm?.revenue_growth_3y_cagr),
-      operating_cash_flow: getValue(llm?.operating_cash_flow),
+      operating_cash_flow: llmMoneyToCanonicalEuros(getValue(llm?.operating_cash_flow)),
       operating_cashflow_positive: getValue(llm?.operating_cashflow_positive),
       revenue_growth: getValue(llm?.revenue_growth),
-      revenue_previous: getValue(llm?.revenue_previous),
+      revenue_previous: llmMoneyToCanonicalEuros(getValue(llm?.revenue_previous)),
       net_income_per_employee: coercePerEmployeeK(getValue(llm?.net_income_per_employee)),
       fcf_per_employee: coercePerEmployeeK(getValue(llm?.fcf_per_employee)),
-      free_cash_flow: getValue(llm?.free_cash_flow),
-      market_cap: getValue(llm?.market_cap)
+      free_cash_flow: llmMoneyToCanonicalEuros(getValue(llm?.free_cash_flow)),
+      market_cap: llmMoneyToCanonicalEuros(getValue(llm?.market_cap))
     };
   }
 
