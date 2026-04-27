@@ -2,9 +2,47 @@
  * Extraction financière via Gemini à partir du contexte LinkedIn (logo image + texte).
  * sw-company-match-prompt.js doit être chargé avant ce fichier.
  */
-/** @see https://ai.google.dev/gemini-api/docs/deprecations */
-const FGC_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+/** Modèle unique extraction / résumé financiers (Google AI `generativelanguage` v1beta). */
+const FGC_GEMINI_MODEL_ID = 'gemini-2.5-flash-lite';
+const FGC_GEMINI_TRANSIENT_MAX_RETRIES = 1;
 const FGC_GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+async function fgcGeminiGenerateContentOnce(apiKey, requestBody, label) {
+  const url = `${FGC_GEMINI_BASE}/${FGC_GEMINI_MODEL_ID}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  let lastError = null;
+  for (let attempt = 0; attempt <= FGC_GEMINI_TRANSIENT_MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        lastError = new Error(`${label} ${FGC_GEMINI_MODEL_ID} ${response.status}: ${text.slice(0, 200)}`);
+        const transient = response.status === 429 || response.status === 500 || response.status === 503;
+        if (transient && attempt < FGC_GEMINI_TRANSIENT_MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
+          continue;
+        }
+        throw lastError;
+      }
+      return JSON.parse(text);
+    } catch (err) {
+      lastError = err;
+      const msg = String(err?.message || err);
+      const m = /\bgemini-[\w.-]+\s+(\d{3})\b/.exec(msg);
+      const status = m ? Number(m[1]) : null;
+      const transient = status === 429 || status === 500 || status === 503;
+      if (transient && attempt < FGC_GEMINI_TRANSIENT_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError || new Error(`${label}: Gemini ${FGC_GEMINI_MODEL_ID} a échoué`);
+}
 
 function parseGeminiCandidateJson(data) {
   const out = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -83,25 +121,6 @@ async function extractFinancialFromCompanyContext(companyName, companyContext, g
     }
   };
 
-  let lastError = null;
-  for (const model of FGC_GEMINI_MODELS) {
-    try {
-      const url = `${FGC_GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        lastError = new Error(`Gemini context extraction ${model} ${response.status}: ${text.slice(0, 200)}`);
-        continue;
-      }
-      const data = JSON.parse(text);
-      return parseGeminiCandidateJson(data);
-    } catch (err) {
-      lastError = err;
-    }
-  }
-  throw lastError || new Error('Extraction financière (contexte) : tous les modèles ont échoué');
+  const data = await fgcGeminiGenerateContentOnce(geminiApiKey, requestBody, 'Gemini context extraction');
+  return parseGeminiCandidateJson(data);
 }

@@ -1,6 +1,6 @@
 /**
  * Court résumé d’activité (Gemini) — aide à juger la pertinence d’un prospect (réseau, enseigne, etc.).
- * Réutilise FGC_GEMINI_MODELS / FGC_GEMINI_BASE depuis financial-gemini-context.js.
+ * Réutilise `fgcGeminiGenerateContentOnce` depuis financial-gemini-context.js.
  */
 
 /** Instructions résumé uniquement (bloc matching + image déjà ajoutés par swBuildGeminiPartsWithMatchContext). */
@@ -65,29 +65,14 @@ async function swFetchCompanySummary(
     }
   };
 
-  let lastError = null;
-  for (const model of FGC_GEMINI_MODELS) {
-    try {
-      const url = `${FGC_GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(geminiApiKey)}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        lastError = new Error(`Gemini résumé ${model} ${response.status}: ${text.slice(0, 200)}`);
-        continue;
-      }
-      const data = JSON.parse(text);
-      const s = swParseGeminiPlainText(data);
-      return s || null;
-    } catch (err) {
-      lastError = err;
-    }
+  try {
+    const data = await fgcGeminiGenerateContentOnce(geminiApiKey, requestBody, 'Gemini résumé');
+    const s = swParseGeminiPlainText(data);
+    return s || null;
+  } catch (err) {
+    console.warn('[Prospection SW] Résumé entreprise:', err?.message || err);
+    return null;
   }
-  console.warn('[Prospection SW] Résumé entreprise:', lastError?.message || lastError);
-  return null;
 }
 
 function swIdentificationNotesFromCached(cached) {

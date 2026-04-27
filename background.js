@@ -12,7 +12,8 @@ importScripts(
   'sw-company-summary.js',
   'sw-supabase-financial.js',
   'sw-supabase-jobs.js',
-  'sw-financial.js'
+  'sw-financial.js',
+  'sw-financial-prefetch-queue.js'
 );
 try {
   importScripts('local-config.js');
@@ -26,12 +27,9 @@ const SUPABASE_LOGS_TABLE = 'extension_logs';
 const SUPABASE_COMPANIES_TABLE = 'companies';
 const EXTENSION_SOURCE = 'extension-prospection';
 
-/**
- * Modèles de secours (Google AI `generativelanguage` v1beta).
- * Les alias 2.0 / 1.5 peuvent renvoyer 404 pour les nouveaux utilisateurs ; privilégier 2.5.
- * @see https://ai.google.dev/gemini-api/docs/deprecations
- */
-const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
+/** Modèle unique classification (Google AI `generativelanguage` v1beta). */
+const GEMINI_MODEL_ID = 'gemini-2.5-flash-lite';
+const GEMINI_TRANSIENT_MAX_RETRIES = 1;
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
@@ -243,10 +241,10 @@ Entreprise : "${String(companyName || '').replace(/"/g, '\\"')}"`;
     generationConfig: { temperature: 0, maxOutputTokens: 16 }
   };
 
+  const url = `${GEMINI_BASE}/${GEMINI_MODEL_ID}:generateContent?key=${encodeURIComponent(apiKey)}`;
   let lastError = null;
-  for (const model of GEMINI_MODELS) {
+  for (let attempt = 0; attempt <= GEMINI_TRANSIENT_MAX_RETRIES; attempt++) {
     try {
-      const url = `${GEMINI_BASE}/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -254,23 +252,36 @@ Entreprise : "${String(companyName || '').replace(/"/g, '\\"')}"`;
       });
       const text = await response.text();
       if (!response.ok) {
-        lastError = new Error(`Gemini ${model} ${response.status}: ${text.slice(0, 200)}`);
-        continue;
+        lastError = new Error(`Gemini ${GEMINI_MODEL_ID} ${response.status}: ${text.slice(0, 200)}`);
+        const transient = response.status === 429 || response.status === 500 || response.status === 503;
+        if (transient && attempt < GEMINI_TRANSIENT_MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+        throw lastError;
       }
       const data = JSON.parse(text);
       const out = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!out) {
-        lastError = new Error(`Réponse vide (${model})`);
-        continue;
+        throw new Error(`Réponse vide (${GEMINI_MODEL_ID})`);
       }
       const parsed = parseGeminiClassificationLabel(out);
       if (parsed) return parsed;
       return 'SS2I';
     } catch (err) {
       lastError = err;
+      const msg = String(err?.message || err);
+      const m = /\bgemini-[\w.-]+\s+(\d{3})\b/.exec(msg);
+      const status = m ? Number(m[1]) : null;
+      const transient = status === 429 || status === 500 || status === 503;
+      if (transient && attempt < GEMINI_TRANSIENT_MAX_RETRIES) {
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        continue;
+      }
+      throw err;
     }
   }
-  throw lastError || new Error('Tous les modèles Gemini ont échoué');
+  throw lastError || new Error(`Gemini ${GEMINI_MODEL_ID} a échoué`);
 }
 
 async function getCompanyFromSupabase(companyName) {
@@ -551,6 +562,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse(r);
         }
       })
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    return true;
+  }
+
+  if (msg.action === 'enqueueFinancialPrefetch') {
+    swFinancialPrefetchEnqueue(String(msg.companyName || '').trim(), msg.companyContext || null)
+      .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
     return true;
   }
