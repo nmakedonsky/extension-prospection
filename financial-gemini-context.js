@@ -2,7 +2,8 @@
  * Extraction financière via Gemini à partir du contexte LinkedIn (logo image + texte).
  * sw-company-match-prompt.js doit être chargé avant ce fichier.
  */
-const FGC_GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+/** @see https://ai.google.dev/gemini-api/docs/deprecations */
+const FGC_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
 const FGC_GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 function parseGeminiCandidateJson(data) {

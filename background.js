@@ -26,8 +26,12 @@ const SUPABASE_LOGS_TABLE = 'extension_logs';
 const SUPABASE_COMPANIES_TABLE = 'companies';
 const EXTENSION_SOURCE = 'extension-prospection';
 
-/** Modèles de secours : éviter gemini-1.5-* (souvent 404 sur l’API actuelle). */
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite'];
+/**
+ * Modèles de secours (Google AI `generativelanguage` v1beta).
+ * Les alias 2.0 / 1.5 peuvent renvoyer 404 pour les nouveaux utilisateurs ; privilégier 2.5.
+ * @see https://ai.google.dev/gemini-api/docs/deprecations
+ */
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash'];
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
