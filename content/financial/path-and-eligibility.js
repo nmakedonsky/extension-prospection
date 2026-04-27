@@ -1,7 +1,12 @@
 /** Chemins jobs + éligibilité carte dans la colonne liste. */
 
 function isJobsSearchResultsPath() {
-  return String(location.pathname || '').includes('/jobs/search-results');
+  const p = String(location.pathname || '');
+  return (
+    p.includes('/jobs/search-results') ||
+    p.includes('/jobs/search/') ||
+    (typeof isJobsSlugListingPath === 'function' && isJobsSlugListingPath())
+  );
 }
 
 function isJobsCollectionsPathDock() {

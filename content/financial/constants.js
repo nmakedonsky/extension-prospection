@@ -5,4 +5,4 @@ const FINANCIAL_CARD_CLASS = 'lph-financial-card';
 const DATA_PN_PROCESSED = 'data-pn-processed';
 const DATA_PN_TYPE = 'data-pn-type';
 const JOB_LINK_TITLE_SEL =
-  'a[href*="/jobs/view/"], a[href*="/jobs/search-results"], a[href*="currentJobId="]';
+  'a[href*="/jobs/view/"], a[href*="/jobs/search/"], a[href*="/jobs/search-results"], a[href*="-emplois"], a[href*="currentJobId="]';

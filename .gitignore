@@ -2,3 +2,5 @@
 .env
 .env.*
 *.local
+# Clés locales pour dev (copie de local-config.example.js)
+local-config.js

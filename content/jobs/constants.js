@@ -24,6 +24,6 @@ const JOB_CARD_SELECTORS = [
 ];
 
 const JOB_LINK_SELECTOR =
-  'a[href*="/jobs/view/"], a[href*="/jobs/search/"], a[href*="/jobs/search-results"], a[href*="/jobs/collections"], a[href*="currentJobId="]';
+  'a[href*="/jobs/view/"], a[href*="/jobs/search/"], a[href*="/jobs/search-results"], a[href*="/jobs/collections"], a[href*="-emplois"], a[href*="currentJobId="]';
 
 const JOB_VIEW_LINK_SELECTOR = 'a[href*="/jobs/view/"]';

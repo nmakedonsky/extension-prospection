@@ -1,5 +1,18 @@
 /** Géométrie colonnes / détail vs liste, chemins URL jobs. */
 
+/**
+ * Listes d’offres LinkedIn hors `search-results` / `search/` : URLs « slug »
+ * (ex. `/jobs/freelance-emplois/`, `/jobs/stage-emplois/`).
+ */
+function isJobsSlugListingPath() {
+  try {
+    const p = String(location.pathname || '');
+    return /\/jobs\/[^/]+-emplois\/?$/i.test(p);
+  } catch (_) {
+    return false;
+  }
+}
+
 /** Colonne liste (two-pane) : bord droit dans la moitié gauche — évite faux positifs « détail » sur /jobs/collections/. */
 function isInLeftJobListColumn(el) {
   const vw = window.innerWidth || 1200;
@@ -15,7 +28,10 @@ function isInLeftJobListColumn(el) {
 function isNodeInJobDetailsComposed(el) {
   if (!el) return false;
   const relaxWeakDetailSignals =
-    (isJobsCollectionsPath() || String(location.pathname || '').includes('/jobs/search-results')) &&
+    (isJobsCollectionsPath() ||
+      String(location.pathname || '').includes('/jobs/search-results') ||
+      String(location.pathname || '').includes('/jobs/search/') ||
+      isJobsSlugListingPath()) &&
     isInLeftJobListColumn(el);
   let n = el;
   while (n) {

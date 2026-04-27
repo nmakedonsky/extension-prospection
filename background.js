@@ -14,14 +14,20 @@ importScripts(
   'sw-supabase-jobs.js',
   'sw-financial.js'
 );
+try {
+  importScripts('local-config.js');
+} catch (_) {
+  /* optionnel : copier local-config.example.js → local-config.js */
+}
 
 const STORAGE_KEY_CONFIG = 'config';
 const STORAGE_KEY_COMPANIES = 'prospectionCompaniesCache';
 const SUPABASE_LOGS_TABLE = 'extension_logs';
 const SUPABASE_COMPANIES_TABLE = 'companies';
-const EXTENSION_SOURCE = 'extension-prospection-next';
+const EXTENSION_SOURCE = 'extension-prospection';
 
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+/** Modèles de secours : éviter gemini-1.5-* (souvent 404 sur l’API actuelle). */
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-lite'];
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
@@ -30,12 +36,37 @@ const inflightClassify = new Map();
 const SENDPILOT_API_BASE = 'https://api.sendpilot.ai/v1';
 
 /**
+ * Vrai si aucune clé « principale » n’a encore été enregistrée (nouvelle install / stockage effacé).
+ * Dans ce cas seulement, les valeurs de `local-config.js` (self.__PN_LOCAL_DEV_CONFIG) sont fusionnées.
+ */
+function isConfigEffectivelyEmpty(c) {
+  if (!c || typeof c !== 'object') return true;
+  const keys = ['geminiApiKey', 'supabaseUrl', 'supabaseAnonKey', 'hubspotApiKey', 'sendPilotApiKey'];
+  return !keys.some((k) => c[k] != null && String(c[k]).trim() !== '');
+}
+
+/**
  * @returns {Promise<{ geminiApiKey?: string, supabaseUrl?: string, supabaseAnonKey?: string, hubspotApiKey?: string, hubspotRegion?: string, sendPilotApiKey?: string }>}
  */
 async function loadConfig() {
   const r = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
-  const c = r[STORAGE_KEY_CONFIG];
-  return c && typeof c === 'object' ? c : {};
+  let c = r[STORAGE_KEY_CONFIG];
+  if (!c || typeof c !== 'object') c = {};
+
+  const local =
+    typeof self !== 'undefined' && self.__PN_LOCAL_DEV_CONFIG && typeof self.__PN_LOCAL_DEV_CONFIG === 'object'
+      ? self.__PN_LOCAL_DEV_CONFIG
+      : null;
+  if (local && isConfigEffectivelyEmpty(c)) {
+    const merged = { ...c };
+    for (const [k, v] of Object.entries(local)) {
+      if (v != null && String(v).trim() !== '') merged[k] = v;
+    }
+    await chrome.storage.local.set({ [STORAGE_KEY_CONFIG]: merged });
+    return merged;
+  }
+
+  return c;
 }
 
 /**
@@ -86,19 +117,32 @@ function hubspotApiOrigin(region) {
 }
 
 /**
- * Requête CRM minimale — vérifie le jeton Private App.
+ * Test de connexion : endpoint compte uniquement (pas CRM contacts / companies).
+ * Certains GET CRM renvoient un message trompeur « scopes contacts requis » selon le compte HubSpot.
  */
 async function testHubSpot(apiKey, region) {
   const key = String(apiKey || '').trim();
   if (!key) {
     return { ok: false, error: 'Clé API HubSpot manquante.' };
   }
-  const origin = hubspotApiOrigin(region);
-  const res = await fetch(`${origin}/crm/v3/objects/contacts?limit=1`, {
-    headers: {
-      Authorization: `Bearer ${key}`
-    }
-  });
+  const primary = hubspotApiOrigin(region);
+  const alternate =
+    primary.includes('eu1') || primary.includes('eu-')
+      ? 'https://api.hubapi.com'
+      : 'https://api-eu1.hubapi.com';
+
+  async function getAccountDetails(base) {
+    return fetch(`${base.replace(/\/$/, '')}/account-info/v3/details`, {
+      headers: {
+        Authorization: `Bearer ${key}`
+      }
+    });
+  }
+
+  let res = await getAccountDetails(primary);
+  if (res.status === 401 || res.status === 404) {
+    res = await getAccountDetails(alternate);
+  }
   const text = await res.text();
   if (!res.ok) {
     return { ok: false, error: text.slice(0, 500) || `HTTP ${res.status}` };

@@ -60,7 +60,12 @@ function getVisibleClientJobCardsTopToBottom() {
 function isJobsListSpaPath() {
   try {
     const p = location.pathname || '';
-    return p.includes('/jobs/search-results') || p.includes('/jobs/collections') || p.includes('/jobs/search/');
+    return (
+      p.includes('/jobs/search-results') ||
+      p.includes('/jobs/collections') ||
+      p.includes('/jobs/search/') ||
+      (typeof isJobsSlugListingPath === 'function' && isJobsSlugListingPath())
+    );
   } catch (_) {
     return false;
   }

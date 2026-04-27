@@ -35,6 +35,33 @@ function swMergeLinkedinData(existingData, incomingData) {
   });
 }
 
+function swBuildJobLookupClauses(jobOffer, payload) {
+  const out = [];
+  const linkedinJobId = jobOffer?.linkedinJobId || payload?.linkedin_job_id;
+  const jobUrl = jobOffer?.jobUrl || payload?.job_url;
+  if (linkedinJobId) {
+    out.push(`linkedin_job_id.eq.${encodeURIComponent(String(linkedinJobId))}`);
+  }
+  if (jobUrl) {
+    out.push(`job_url.eq.${encodeURIComponent(String(jobUrl))}`);
+  }
+  return out;
+}
+
+async function swFetchExistingSavedJobRow(url, headers, lookupClauses) {
+  if (!lookupClauses?.length) return null;
+  const lookupUrl = `${url}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?or=(${lookupClauses.join(',')})&select=*&limit=1`;
+  const lookupRes = await fetch(lookupUrl, { method: 'GET', headers });
+  if (!lookupRes.ok) return null;
+  const rows = await lookupRes.json();
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+function swIsDuplicateConstraintError(text) {
+  const s = String(text || '').toLowerCase();
+  return s.includes('duplicate key value') || s.includes('unique constraint');
+}
+
 async function swSaveJobOfferLocally(jobOffer) {
   const key = buildJobOfferStorageKey(jobOffer);
   if (!key) return { ok: false, error: 'Job offer key introuvable' };
@@ -84,37 +111,8 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
   };
 
   try {
-    const lookupClauses = [];
-    if (jobOffer?.linkedinJobId) {
-      lookupClauses.push(`linkedin_job_id.eq.${encodeURIComponent(String(jobOffer.linkedinJobId))}`);
-    }
-    if (jobOffer?.jobUrl) {
-      lookupClauses.push(`job_url.eq.${encodeURIComponent(String(jobOffer.jobUrl))}`);
-    }
-    let existingRows = [];
-    if (lookupClauses.length) {
-      const lookupUrl = `${url}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?or=(${lookupClauses.join(',')})&select=id&limit=1`;
-      const lookupRes = await fetch(lookupUrl, { method: 'GET', headers });
-      if (!lookupRes.ok) {
-        const text = await lookupRes.text();
-        return { ok: false, error: `lookup ${lookupRes.status}: ${text.slice(0, 200)}` };
-      }
-      existingRows = await lookupRes.json();
-    }
-
-    let existingRow = null;
-    if (Array.isArray(existingRows) && existingRows[0]?.id) {
-      const existingRes = await fetch(
-        `${url}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?id=eq.${encodeURIComponent(existingRows[0].id)}&select=*`,
-        { method: 'GET', headers }
-      );
-      if (!existingRes.ok) {
-        const text = await existingRes.text();
-        return { ok: false, error: `read ${existingRes.status}: ${text.slice(0, 200)}` };
-      }
-      const rows = await existingRes.json();
-      existingRow = rows?.[0] || null;
-    }
+    const lookupClauses = swBuildJobLookupClauses(jobOffer);
+    let existingRow = await swFetchExistingSavedJobRow(url, headers, lookupClauses);
 
     const mergedLinkedinData = swMergeLinkedinData(
       existingRow?.linkedin_data,
@@ -152,9 +150,9 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       updated_at: new Date().toISOString()
     });
 
-    if (Array.isArray(existingRows) && existingRows[0]?.id) {
+    if (existingRow?.id) {
       const patchRes = await fetch(
-        `${url}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?id=eq.${encodeURIComponent(existingRows[0].id)}`,
+        `${url}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?id=eq.${encodeURIComponent(existingRow.id)}`,
         {
           method: 'PATCH',
           headers,
@@ -173,6 +171,23 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
     });
     if (insertRes.ok) return { ok: true, mode: 'insert' };
     const insertText = await insertRes.text();
+    if (swIsDuplicateConstraintError(insertText)) {
+      const recoveredLookup = swBuildJobLookupClauses(jobOffer, payload);
+      const recoveredRow = await swFetchExistingSavedJobRow(url, headers, recoveredLookup);
+      if (recoveredRow?.id) {
+        const retryPatchRes = await fetch(
+          `${url}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?id=eq.${encodeURIComponent(recoveredRow.id)}`,
+          {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify(payload)
+          }
+        );
+        if (retryPatchRes.ok) return { ok: true, mode: 'insert-duplicate-recovered' };
+        const retryText = await retryPatchRes.text();
+        return { ok: false, error: `patch-after-duplicate ${retryPatchRes.status}: ${retryText.slice(0, 200)}` };
+      }
+    }
     return { ok: false, error: `insert ${insertRes.status}: ${insertText.slice(0, 200)}` };
   } catch (e) {
     console.warn('[Prospection BG] Supabase job upsert:', e.message);

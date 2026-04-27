@@ -30,6 +30,17 @@ function sendClassify(companyName) {
   });
 }
 
+function ensureBadgeOnProcessedCard(card) {
+  if (!card?.hasAttribute?.(DATA_PROCESSED)) return;
+  const type = card.getAttribute(DATA_TYPE);
+  if (type !== 'Client' && type !== 'SS2I') return;
+  const cel = findCompanyElementInCard(card);
+  if (!cel || isNodeInJobDetailsComposed(card)) return;
+  const hasBadge = !!cel.querySelector('.pn-badge');
+  if (hasBadge) return;
+  cel.appendChild(createBadge(type));
+}
+
 async function processCard(card) {
   if (!isClassificationTargetPage()) return;
   const cel = findCompanyElementInCard(card);
@@ -86,7 +97,10 @@ async function runClassificationPass() {
   const cards = collectJobCards();
   const todo = [];
   for (const card of cards) {
-    if (card.hasAttribute(DATA_PROCESSED)) continue;
+    if (card.hasAttribute(DATA_PROCESSED)) {
+      ensureBadgeOnProcessedCard(card);
+      continue;
+    }
     if (card.hasAttribute(DATA_LOADING)) continue;
     const failedAt = Number(card.getAttribute(DATA_FAILED) || '0');
     if (failedAt && Date.now() - failedAt < 15000) continue;

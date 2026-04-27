@@ -209,11 +209,13 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
 
 function swGetHubspotAuth(apiKey) {
   const key = String(apiKey || '').replace(/\s+/g, ' ').trim();
-  const useBearer = /^pat-/.test(key) || key.length > 40;
   const headers = { 'Content-Type': 'application/json' };
-  if (useBearer) headers.Authorization = `Bearer ${key}`;
-  const qs = useBearer ? '' : `?hapikey=${encodeURIComponent(key)}`;
-  return { headers, qs };
+  if (key) {
+    // CRM v3 : uniquement Authorization Bearer. Les jetons d’app privée commencent souvent par pat-,
+    // mais d’autres jetons (OAuth, « accès personnel », etc.) n’ont pas ce préfixe — on envoie toujours Bearer.
+    headers.Authorization = `Bearer ${key}`;
+  }
+  return { headers, qs: '' };
 }
 
 async function swHubspotApi(path, method, body, auth) {

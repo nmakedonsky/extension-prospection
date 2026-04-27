@@ -1,5 +1,14 @@
 /** Payload télémétrie + marqueurs CSS de chemin. */
 
+function isJobsSearchResultsLikePath() {
+  const p = String(location.pathname || '');
+  return (
+    p.includes('/jobs/search-results') ||
+    p.includes('/jobs/search/') ||
+    (typeof isJobsSlugListingPath === 'function' && isJobsSlugListingPath())
+  );
+}
+
 function buildScanPayload() {
   pnSyncPathForPerf();
 
@@ -40,12 +49,11 @@ function applyPathMarkerClass() {
     const html = document.documentElement;
     const p = String(location.pathname || '');
     html.classList.remove('pn-path-jobs-search-results', 'pn-path-jobs-collections');
-    if (p.includes('/jobs/search-results')) html.classList.add('pn-path-jobs-search-results');
+    if (isJobsSearchResultsLikePath()) html.classList.add('pn-path-jobs-search-results');
     else if (p.includes('/jobs/collections')) html.classList.add('pn-path-jobs-collections');
   } catch (_) {}
 }
 
 function isClassificationTargetPage() {
-  const p = String(location.pathname || '');
-  return p.includes('/jobs/search-results') || p.includes('/jobs/collections');
+  return isJobsSearchResultsLikePath() || isJobsCollectionsPath();
 }
