@@ -110,6 +110,14 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
     companyContext && typeof companyContext === 'object' ? swFinancialPrefetchSanitizeCompanyContext(companyContext) : null;
 
   const key = swFinancialPrefetchNormalizeKey(name);
+
+  if (await swHasFreshFinancialData(name)) {
+    const fp = swFinancialPrefetchContextFingerprint(safeCtx);
+    await swFinancialPrefetchRememberContextFingerprint(key, fp);
+    void swFinancialPrefetchKick();
+    return { ok: true, mode: 'skip-cached' };
+  }
+
   const q0 = await swFinancialPrefetchLoadQueue();
   const dupPending = q0.some((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key);
   if (dupPending) {
@@ -158,6 +166,13 @@ async function swFinancialPrefetchKick() {
       if (!name) {
         q.shift();
         await swFinancialPrefetchSaveQueue(q);
+        continue;
+      }
+
+      if (await swHasFreshFinancialData(name)) {
+        q.shift();
+        await swFinancialPrefetchSaveQueue(q);
+        await new Promise((r) => setTimeout(r, SW_FINANCIAL_PREFETCH_GAP_MS));
         continue;
       }
 

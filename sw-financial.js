@@ -29,6 +29,27 @@ async function swSetFinancialCache(companyName, entry) {
   await chrome.storage.local.set({ [SW_FINANCIAL_CACHE_KEY]: cache });
 }
 
+/**
+ * Données financières déjà présentes et encore valides (même règles que les courts-circuits de swGetFinancialData).
+ * Utilisé par la file de préfetch pour éviter tout appel pipeline / Gemini inutile.
+ */
+async function swHasFreshFinancialData(companyName) {
+  const key = swNormalizeCompanyKey(companyName);
+  if (!key) return false;
+  const cached = await swGetFinancialCache(companyName);
+  if (cached?.updatedAt && Date.now() - cached.updatedAt < SW_FINANCIAL_CACHE_TTL_MS) {
+    return true;
+  }
+  const supabaseFinancial = await swGetFinancialFromSupabase(companyName);
+  const payload = supabaseFinancial?.financial_pipeline_cache;
+  const updatedAtIso = supabaseFinancial?.financial_pipeline_cache_at;
+  const updatedAt = updatedAtIso ? new Date(updatedAtIso).getTime() : null;
+  if (payload?.data && updatedAt && Date.now() - updatedAt < SW_FINANCIAL_CACHE_TTL_MS) {
+    return true;
+  }
+  return false;
+}
+
 function swAttachScoreBreakdownIfNeeded(unified) {
   if (!unified) return null;
   if (!unified.financials) return unified;
