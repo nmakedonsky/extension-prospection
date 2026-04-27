@@ -17,14 +17,15 @@
   }
 
   /**
-   * Prompt : revenue en millions (M€) sauf si ≥ 1e9 → CA annuel en € (unité pleine).
-   * Sortie : k€ / tête (cohérent scoring ~25–400 pour la plupart des boîtes).
+   * Calcule CA/salarié en k€ en acceptant les 2 conventions:
+   * - montant absolu (ex. 20_000_000 €)
+   * - montant en millions (ex. 20 pour 20 M€)
    */
   function inferRevenuePerEmployeeK(revenue, employees) {
     const R = Number(revenue);
     const E = Number(employees);
     if (!Number.isFinite(R) || !Number.isFinite(E) || E <= 0) return null;
-    if (R >= 1e9) {
+    if (Math.abs(R) >= 1e6) {
       return (R / E) / 1000;
     }
     return (R * 1000) / E;

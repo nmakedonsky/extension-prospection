@@ -135,20 +135,5 @@ function installFinancialPanelJobSelection() {
 function attachFinancialPanelOpenJobClick() {
   if (window.__pnFinancialPanelOpenJob) return;
   window.__pnFinancialPanelOpenJob = true;
-  document.body.addEventListener(
-    'click',
-    (e) => {
-      const dock = e.target.closest('.lph-financial-dock');
-      if (!dock || dock.hidden) return;
-      const card = e.target.closest(`.${FINANCIAL_CARD_CLASS}`);
-      if (!card) return;
-      if (e.target.closest('button')) return;
-      const url = card.dataset.lphJobUrl;
-      if (!url) return;
-      e.preventDefault();
-      e.stopPropagation();
-      window.location.assign(url);
-    },
-    true
-  );
+  // Intention utilisateur: aucun clic dans le panneau financier ne doit rediriger vers la job.
 }

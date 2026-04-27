@@ -1,9 +1,33 @@
 /** Formatage et rendu des lignes de métriques financières / startup. */
 
+const FINANCIAL_METRIC_HELP = {
+  Embauche:
+    "Signal de dynamique d'effectif (0 à 1, parfois 0 à 100) estimé depuis des indices publics récents (offres, croissance d'équipes, annonces). Ce n'est pas un nombre d'embauches réalisées ni une promesse sur 12 mois.",
+  'Mots-clés':
+    "Score (0 à 1) de pertinence de mots-clés de croissance/expansion détectés dans le contexte public (ex: ouverture, recrutement, international). Plus c'est élevé, plus les signaux sont présents.",
+  Expansion:
+    "Oui si des signaux publics d'expansion sont détectés (nouveaux marchés, ouvertures, internationalisation, accélération commerciale). Non signifie qu'aucun signal clair n'a été retenu.",
+  'Levée ?':
+    "Oui si une levée de fonds est détectée dans les signaux publics. Non si aucun indice de levée récente n'a été trouvé.",
+  Levée:
+    "Date estimée de la dernière levée détectée. Vide si aucune levée fiable n'a été identifiée.",
+  Montant:
+    "Montant de la dernière levée détectée (si disponible). Peut être absent même si une levée existe.",
+  Stage:
+    "Stade estimé de levée (seed, series_a, series_b, series_c, other)."
+};
+
+function pnFinancialScalar(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'object' && v !== null && Number.isFinite(Number(v.value))) return Number(v.value);
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function formatRevenueRaw(n) {
-  if (n == null || n === '') return null;
-  const v = Number(n);
-  if (!Number.isFinite(v)) return null;
+  const v = pnFinancialScalar(n);
+  if (v == null) return null;
   if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(2)} Md`;
   if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(2)} M`;
   if (Math.abs(v) >= 1e3) return `${Math.round(v / 1e3)} k`;
@@ -16,6 +40,12 @@ function appendMetricRow(list, labelText, valueText, valueClass) {
   const label = document.createElement('span');
   label.className = 'lph-financial-card__label';
   label.textContent = labelText;
+  const hint = FINANCIAL_METRIC_HELP[labelText] || null;
+  if (hint) {
+    label.classList.add('lph-financial-card__label--help');
+    label.title = hint;
+    li.title = hint;
+  }
   const value = document.createElement('span');
   value.className = `lph-financial-card__value ${valueClass}`.trim();
   value.textContent = valueText;
@@ -43,7 +73,10 @@ function renderFinancialMetrics(list, response) {
   const ratioX = (x) => (x == null || x === '' ? '—' : `${Math.round(Number(x) * 10) / 10}×`);
 
   const revenue = f.revenue ?? s.revenue_public ?? null;
-  const revStr = revenue != null ? formatRevenueRaw(revenue) : '—';
+  const revScalar = pnFinancialScalar(revenue);
+  const revStr = revScalar != null ? formatRevenueRaw(revenue) : '—';
+  const marketCap = f.market_cap;
+  const capScalar = pnFinancialScalar(marketCap);
 
   appendSectionHeader(list, 'Finance');
   if (response?.symbol) {
@@ -52,16 +85,16 @@ function renderFinancialMetrics(list, response) {
   appendMetricRow(
     list,
     'Mkt cap',
-    f.market_cap != null ? formatRevenueRaw(f.market_cap) : '—',
-    f.market_cap != null ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a'
+    capScalar != null ? formatRevenueRaw(marketCap) : '—',
+    capScalar != null ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a'
   );
   appendMetricRow(
     list,
     'CA',
     revStr,
-    revenue != null && Number(revenue) >= 10_000_000
+    revScalar != null && revScalar >= 10_000_000
       ? 'lph-financial-card__value--ok'
-      : revenue != null
+      : revScalar != null
         ? 'lph-financial-card__value--warn'
         : 'lph-financial-card__value--n/a'
   );

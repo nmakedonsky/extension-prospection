@@ -15,15 +15,10 @@ function populateFinancialPanel(companyName, jobInfo = {}) {
   card.classList.add('lph-financial-card--compact');
   while (card.firstChild) card.removeChild(card.firstChild);
 
-  if (jobUrl) {
-    card.dataset.lphJobUrl = jobUrl;
-    card.classList.add('lph-financial-card--clickable');
-    card.title = 'Cliquer pour ouvrir l’offre';
-  } else {
-    delete card.dataset.lphJobUrl;
-    card.classList.remove('lph-financial-card--clickable');
-    card.removeAttribute('title');
-  }
+  // Le panneau financier est informatif : cliquer la carte ne doit jamais rediriger vers l'offre.
+  delete card.dataset.lphJobUrl;
+  card.classList.remove('lph-financial-card--clickable');
+  card.removeAttribute('title');
 
   const title = document.createElement('div');
   title.className = 'lph-financial-card__title';
@@ -164,7 +159,8 @@ function populateFinancialPanel(companyName, jobInfo = {}) {
   };
 
   const applyFinancialResponse = (response) => {
-    if (!response?.ok || !response.data) return false;
+    if (!response?.ok) return false;
+    if (!response.data && !response.unified) return false;
     renderFinancialMetrics(list, response);
     updateSummary(response);
 

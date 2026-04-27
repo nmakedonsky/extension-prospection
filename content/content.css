@@ -357,6 +357,12 @@ html.lph-financial-dock-active body:not(:has(#root)) {
   color: #555;
 }
 
+.lph-financial-card__label--help {
+  cursor: help;
+  text-decoration: underline dotted #9ca3af;
+  text-underline-offset: 2px;
+}
+
 .lph-financial-card__value {
   flex-shrink: 0;
   font-weight: 600;

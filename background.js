@@ -478,6 +478,96 @@ function logToSupabase(event, data, level) {
   return postExtensionLog(event, data, level || 'info').catch(() => {});
 }
 
+/**
+ * Rotation du stockage local quand on approche du quota (~5 Mo).
+ * Les données financières détaillées restent sur Supabase ; le local est un cache léger.
+ */
+async function pnExtensionStorageRotateHeavy(reason, opts) {
+  opts = opts || {};
+  const force = !!opts.force;
+  const cacheCap =
+    typeof opts.cacheCap === 'number' && opts.cacheCap > 0 ? opts.cacheCap : 48;
+
+  try {
+    let bytesBefore = null;
+    if (chrome.storage.local && chrome.storage.local.getBytesInUse) {
+      bytesBefore = await new Promise((resolve, reject) => {
+        chrome.storage.local.getBytesInUse(null, (bytes) => {
+          if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+          else resolve(bytes);
+        });
+      }).catch(() => null);
+    }
+
+    const LIMIT =
+      typeof chrome.storage.local.QUOTA_BYTES === 'number'
+        ? chrome.storage.local.QUOTA_BYTES
+        : 5242880;
+    const TRIGGER = Math.floor(LIMIT * 0.72);
+
+    const aboveThreshold =
+      typeof bytesBefore === 'number' && bytesBefore >= TRIGGER;
+
+    if (!force && !aboveThreshold) {
+      return { rotated: false, bytesBefore };
+    }
+
+    await chrome.storage.local.remove([
+      'pnFinancialPrefetchQueue',
+      'pnFinancialPrefetchLastCtx'
+    ]);
+
+    const fc = await chrome.storage.local.get('financialCache');
+    const cache = fc.financialCache;
+    if (cache && typeof cache === 'object') {
+      const pairs = Object.entries(cache).sort(
+        (a, b) =>
+          Number(b?.[1]?.updatedAt || 0) - Number(a?.[1]?.updatedAt || 0)
+      );
+      const capped = Object.fromEntries(pairs.slice(0, cacheCap));
+      await chrome.storage.local.set({ financialCache: capped });
+    }
+
+    void logToSupabase(
+      'extension_storage_rotate',
+      {
+        reason,
+        bytes_before: bytesBefore,
+        quota_bytes: LIMIT,
+        prefetch_cleared: true,
+        cache_cap: cacheCap,
+        forced: force
+      },
+      'warn'
+    );
+
+    return { rotated: true, bytesBefore };
+  } catch (e) {
+    void logToSupabase(
+      'extension_storage_rotate_failed',
+      { reason, error: String(e && e.message ? e.message : e).slice(0, 400) },
+      'warn'
+    );
+    return { rotated: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+self.pnExtensionStorageRotateHeavy = pnExtensionStorageRotateHeavy;
+
+chrome.runtime.onStartup.addListener(() => {
+  void (async () => {
+    await pnExtensionStorageRotateHeavy('startup');
+    void swFinancialPrefetchKick();
+  })();
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void (async () => {
+    await pnExtensionStorageRotateHeavy('installed');
+    void swFinancialPrefetchKick();
+  })();
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object') {
     return false;
@@ -567,9 +657,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'enqueueFinancialPrefetch') {
-    swFinancialPrefetchEnqueue(String(msg.companyName || '').trim(), msg.companyContext || null)
-      .then((r) => sendResponse(r))
-      .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    const companyName = String(msg.companyName || '').trim();
+    swFinancialPrefetchEnqueue(companyName, msg.companyContext || null)
+      .then((r) => {
+        void postExtensionLog('financial_prefetch_message', {
+          company_name: companyName.slice(0, 120),
+          mode: r?.mode || null,
+          ok: !!r?.ok,
+          tabId: sender?.tab?.id ?? null,
+          pageUrl: sender?.tab?.url || null
+        }).catch(() => {});
+        sendResponse(r);
+      })
+      .catch((e) => {
+        const err = String(e && e.message ? e.message : e);
+        void postExtensionLog(
+          'financial_prefetch_message',
+          {
+            company_name: companyName.slice(0, 120),
+            ok: false,
+            error: err.slice(0, 500),
+            tabId: sender?.tab?.id ?? null,
+            pageUrl: sender?.tab?.url || null
+          },
+          'warn'
+        ).catch(() => {});
+        sendResponse({ ok: false, error: err });
+      });
     return true;
   }
 

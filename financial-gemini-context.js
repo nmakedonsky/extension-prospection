@@ -68,7 +68,7 @@ Référence nom pour les champs : "${String(companyName || '').replace(/"/g, '\\
 3) revenue, revenue_previous, market_cap, ebitda, operating_cash_flow, free_cash_flow : en millions (M€ / M$), sauf si tu dois utiliser le montant absolu en unités pleines (≥ 1e9 dans ce cas). employees = effectif (ETP) récent, en nombre de têtes (pas en millions).
 4) revenuePerEmployee = uniquement le CA par employé en milliers (k€ ou k$ par tête), typiquement entre ~50 et ~800 pour les grands groupes — jamais en euros bruts par tête (pas 600000) ; sinon null.
 5) net_income_per_employee et fcf_per_employee : en milliers par tête (k), pas en euros bruts ; sinon null.
-6) Marges en pourcentage (ex. 12 pour 12 %).
+6) Marges et taux de croissance en pourcentage (ex. 12 pour 12 %, 9.3 pour 9.3 %). Ratios (ex. net_debt_ebitda) en multiplicateur simple (ex. 1.5).
 7) Si tu ne peux pas estimer raisonnablement une métrique, mets null et une confidence basse sur ce champ.
 8) globalConfidence : ta confiance globale 0–100 sur l'ensemble de l'extraction.
 

@@ -7,12 +7,20 @@
 
 const SW_FINANCIAL_PREFETCH_QUEUE_KEY = 'pnFinancialPrefetchQueue';
 const SW_FINANCIAL_PREFETCH_LAST_CTX_KEY = 'pnFinancialPrefetchLastCtx';
-const SW_FINANCIAL_PREFETCH_MAX_ITEMS = 800;
-const SW_FINANCIAL_PREFETCH_MAX_LAST_MAP = 1500;
+const SW_FINANCIAL_PREFETCH_MAX_ITEMS = 80;
+const SW_FINANCIAL_PREFETCH_MAX_LAST_MAP = 320;
 const SW_FINANCIAL_PREFETCH_GAP_MS = 650;
 const SW_FINANCIAL_PREFETCH_MAX_ATTEMPTS = 2; // 1 tentative + 1 retry
 
 let swFinancialPrefetchProcessing = false;
+
+function swPrefetchLog(event, data, level = 'info') {
+  try {
+    if (typeof logToSupabase === 'function') {
+      logToSupabase(event, data && typeof data === 'object' ? data : {}, level);
+    }
+  } catch (_) {}
+}
 
 function swFinancialPrefetchNormalizeKey(companyName) {
   return String(companyName || '')
@@ -47,8 +55,26 @@ async function swFinancialPrefetchLoadQueue() {
 }
 
 async function swFinancialPrefetchSaveQueue(queue) {
-  const trimmed = queue.slice(-SW_FINANCIAL_PREFETCH_MAX_ITEMS);
-  await chrome.storage.local.set({ [SW_FINANCIAL_PREFETCH_QUEUE_KEY]: trimmed });
+  let trimmed = queue.slice(-SW_FINANCIAL_PREFETCH_MAX_ITEMS);
+  try {
+    await chrome.storage.local.set({ [SW_FINANCIAL_PREFETCH_QUEUE_KEY]: trimmed });
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (!/quota|kquotabytes|quotaexceeded/i.test(msg)) throw e;
+    trimmed = queue.slice(-40);
+    try {
+      await chrome.storage.local.set({ [SW_FINANCIAL_PREFETCH_QUEUE_KEY]: trimmed });
+    } catch (_) {
+      if (typeof self.pnExtensionStorageRotateHeavy === 'function') {
+        await self.pnExtensionStorageRotateHeavy('quota_prefetch_save', {
+          force: true,
+          cacheCap: 40
+        });
+      }
+      trimmed = queue.slice(-18);
+      await chrome.storage.local.set({ [SW_FINANCIAL_PREFETCH_QUEUE_KEY]: trimmed });
+    }
+  }
   return trimmed;
 }
 
@@ -115,6 +141,10 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
     const fp = swFinancialPrefetchContextFingerprint(safeCtx);
     await swFinancialPrefetchRememberContextFingerprint(key, fp);
     void swFinancialPrefetchKick();
+    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'skip-cached' });
+    try {
+      console.info('[Prospection SW] prefetch enqueue skip-cached:', name);
+    } catch (_) {}
     return { ok: true, mode: 'skip-cached' };
   }
 
@@ -122,12 +152,20 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   const dupPending = q0.some((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key);
   if (dupPending) {
     void swFinancialPrefetchKick();
+    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'deduped-pending' });
+    try {
+      console.info('[Prospection SW] prefetch enqueue deduped-pending:', name);
+    } catch (_) {}
     return { ok: true, mode: 'deduped-pending' };
   }
 
   const recent = await swFinancialPrefetchIsContextFingerprintRecent(key, safeCtx);
   if (recent.hit) {
     void swFinancialPrefetchKick();
+    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'deduped-context' });
+    try {
+      console.info('[Prospection SW] prefetch enqueue deduped-context:', name);
+    } catch (_) {}
     return { ok: true, mode: 'deduped-context' };
   }
 
@@ -142,6 +180,10 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   const q = await swFinancialPrefetchLoadQueue();
   if (q.some((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key)) {
     void swFinancialPrefetchKick();
+    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'deduped-pending' });
+    try {
+      console.info('[Prospection SW] prefetch enqueue deduped-pending:', name);
+    } catch (_) {}
     return { ok: true, mode: 'deduped-pending' };
   }
 
@@ -149,6 +191,10 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   await swFinancialPrefetchSaveQueue(q);
   await swFinancialPrefetchRememberContextFingerprint(key, recent.fp);
   void swFinancialPrefetchKick();
+  swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'enqueued' });
+  try {
+    console.info('[Prospection SW] prefetch enqueue enqueued:', name);
+  } catch (_) {}
   return { ok: true, mode: 'enqueued' };
 }
 
@@ -172,22 +218,55 @@ async function swFinancialPrefetchKick() {
       if (await swHasFreshFinancialData(name)) {
         q.shift();
         await swFinancialPrefetchSaveQueue(q);
+        swPrefetchLog('financial_prefetch_worker', { company_name: name, mode: 'skip-cached' });
+        try {
+          console.info('[Prospection SW] prefetch worker skip-cached:', name);
+        } catch (_) {}
         await new Promise((r) => setTimeout(r, SW_FINANCIAL_PREFETCH_GAP_MS));
         continue;
       }
 
       try {
         await swGetFinancialData(name, false, item?.companyContext || null);
+        swPrefetchLog('financial_prefetch_worker', { company_name: name, mode: 'success' });
+        try {
+          console.info('[Prospection SW] prefetch worker success:', name);
+        } catch (_) {}
       } catch (e) {
         const msgStr = String(e && e.message ? e.message : e);
         if (msgStr.startsWith('CONTEXTE_MATCH_INCOMPLET:')) {
           // Contexte incomplet : inutile de boucler — on drop.
+          swPrefetchLog(
+            'financial_prefetch_worker',
+            { company_name: name, mode: 'drop-context', error: msgStr.slice(0, 500) },
+            'warn'
+          );
+          try {
+            console.warn('[Prospection SW] prefetch worker dropped (context):', name, msgStr);
+          } catch (_) {}
         } else if (swFinancialPrefetchIsTransientErrorMessage(msgStr) && Number(item.attempts || 0) + 1 < SW_FINANCIAL_PREFETCH_MAX_ATTEMPTS) {
           item.attempts = Number(item.attempts || 0) + 1;
           q[0] = item;
           await swFinancialPrefetchSaveQueue(q);
+          swPrefetchLog(
+            'financial_prefetch_worker',
+            { company_name: name, mode: 'retry', attempt: item.attempts, error: msgStr.slice(0, 500) },
+            'warn'
+          );
+          try {
+            console.warn('[Prospection SW] prefetch worker retry:', name, item.attempts, msgStr);
+          } catch (_) {}
           await new Promise((r) => setTimeout(r, SW_FINANCIAL_PREFETCH_GAP_MS * 2));
           continue;
+        } else {
+          swPrefetchLog(
+            'financial_prefetch_worker',
+            { company_name: name, mode: 'drop', error: msgStr.slice(0, 500) },
+            'warn'
+          );
+          try {
+            console.warn('[Prospection SW] prefetch worker drop:', name, msgStr);
+          } catch (_) {}
         }
       }
 
@@ -200,10 +279,3 @@ async function swFinancialPrefetchKick() {
   }
 }
 
-chrome.runtime.onStartup.addListener(() => {
-  void swFinancialPrefetchKick();
-});
-
-chrome.runtime.onInstalled.addListener(() => {
-  void swFinancialPrefetchKick();
-});
