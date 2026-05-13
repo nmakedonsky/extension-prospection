@@ -3,13 +3,9 @@
  * Reprise logique « repoll » jusqu’à description exploitable ou délai max.
  */
 
-const STORAGE_KEY_JOB_DESK_VISITED = 'pnVisitedJobDeskKeys';
-const MAX_VISITED_JOB_DESK_KEYS = 4000;
-
 const JOB_SCRAPE_AFTER_OPEN_FIRST_DELAY_MS = 520;
 const JOB_SCRAPE_AFTER_OPEN_STEP_MS = 380;
 const JOB_SCRAPE_AFTER_OPEN_MAX_MS = 18000;
-const FORCE_RESCRAPE_CUTOFF_LOCAL_DAY_MS = new Date(new Date().setHours(0, 0, 0, 0)).getTime();
 
 const JOB_DETAIL_PANEL_SELECTORS = [
   '.jobs-search__job-details--container',
@@ -34,6 +30,42 @@ const JOB_METADATA_ITEM_SELECTORS = [
 ];
 
 let lastSavedJobFingerprint = null;
+
+function jdScPageKey() {
+  try {
+    const u = new URL(location.href);
+    return `${u.pathname}|st=${u.searchParams.get('start') || '0'}`.slice(0, 200);
+  } catch (_) {
+    return '';
+  }
+}
+
+/** Aligné sur `jobdesk-autoopen.js` (liste sans `currentJobId`). */
+function jdListPageKeyForLog() {
+  try {
+    const u = new URL(location.href);
+    const sp = new URLSearchParams(u.search);
+    sp.delete('currentJobId');
+    const qs = sp.toString();
+    return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
+  } catch (_) {
+    return '';
+  }
+}
+
+function jdScLog(payload) {
+  try {
+    sendRuntimeMessageSafe(
+      {
+        type: 'EXTENSION_LOG',
+        event: 'jd_sc',
+        level: 'info',
+        data: { ...(payload || {}), pk: jdScPageKey(), lk: jdListPageKeyForLog() || undefined, t: Date.now() }
+      },
+      () => {}
+    );
+  } catch (_) {}
+}
 
 function pnNormalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
@@ -217,7 +249,7 @@ function getJobDeskReadyState(payload) {
   };
 }
 
-function pnSaveJobOfferToBackground(jobOffer) {
+function pnSaveJobOfferToBackground(jobOffer, wrapper) {
   const fingerprint = JSON.stringify([
     jobOffer.stage || '',
     jobOffer.linkedinJobId || '',
@@ -229,14 +261,23 @@ function pnSaveJobOfferToBackground(jobOffer) {
   ]);
   if (fingerprint === lastSavedJobFingerprint) return;
   lastSavedJobFingerprint = fingerprint;
-  sendRuntimeMessageSafe({ action: 'saveJobOffer', jobOffer }, () => {});
+  const dedupKey =
+    wrapper && typeof dedupeKeyForCard === 'function' ? dedupeKeyForCard(wrapper) : '';
+  sendRuntimeMessageSafe({ action: 'saveJobOffer', jobOffer, dedupKey }, () => {});
 }
 
 /**
  * Enchaîne après ouverture du panneau détail : `buildJobDetailsPayload` lit le DOM Jobdesk.
+ * @param {HTMLElement|null} wrapper
+ * @param {{ o?: 'a' | 'u' }} [opts] o=a auto-open, o=u clic utilisateur
  */
-function scheduleJobOfferScrape(wrapper) {
+function scheduleJobOfferScrape(wrapper, opts) {
+  const origin = opts && opts.o === 'u' ? 'u' : 'a';
+  const card0 = buildJobCardPayload(wrapper);
+  const jid0 = String(card0?.linkedinJobId || '');
   const started = Date.now();
+  jdScLog({ jid: jid0, st: 'b', o: origin });
+
   let finished = false;
   let bestPayload = null;
   let lastReadySignature = '';
@@ -244,7 +285,11 @@ function scheduleJobOfferScrape(wrapper) {
 
   const attempt = () => {
     if (finished) return;
-    if (!wrapper?.isConnected) return;
+    if (wrapper && !wrapper.isConnected) {
+      finished = true;
+      jdScLog({ jid: jid0, st: 'x', o: origin, ms: Date.now() - started });
+      return;
+    }
     const payload = buildJobDetailsPayload(wrapper);
     if (payload) bestPayload = payload;
 
@@ -259,12 +304,26 @@ function scheduleJobOfferScrape(wrapper) {
 
     if (stableReadyCount >= 2 && payload) {
       finished = true;
-      pnSaveJobOfferToBackground(payload);
+      pnSaveJobOfferToBackground(payload, wrapper);
+      jdScLog({
+        jid: String(payload.linkedinJobId || jid0),
+        st: 'ok',
+        o: origin,
+        ms: Date.now() - started,
+        dl: String(payload.descriptionText || '').length
+      });
       return;
     }
     if (Date.now() - started >= JOB_SCRAPE_AFTER_OPEN_MAX_MS) {
       finished = true;
-      if (bestPayload) pnSaveJobOfferToBackground(bestPayload);
+      if (bestPayload) pnSaveJobOfferToBackground(bestPayload, wrapper);
+      jdScLog({
+        jid: String((bestPayload && bestPayload.linkedinJobId) || jid0),
+        st: bestPayload ? 't' : 'e',
+        o: origin,
+        ms: Date.now() - started,
+        dl: bestPayload ? String(bestPayload.descriptionText || '').length : 0
+      });
       return;
     }
     window.setTimeout(attempt, JOB_SCRAPE_AFTER_OPEN_STEP_MS);
@@ -279,41 +338,6 @@ function saveJobCardSnapshot(wrapper) {
   if (!payload) return;
   wrapper.setAttribute(DATA_JOB_CARD_SAVED, 'true');
   pnSaveJobOfferToBackground(payload);
-}
-
-async function getVisitedJobDeskMap() {
-  try {
-    const r = await chrome.storage.local.get(STORAGE_KEY_JOB_DESK_VISITED);
-    const raw = r[STORAGE_KEY_JOB_DESK_VISITED] && typeof r[STORAGE_KEY_JOB_DESK_VISITED] === 'object'
-      ? r[STORAGE_KEY_JOB_DESK_VISITED]
-      : {};
-    const filtered = {};
-    for (const [k, ts] of Object.entries(raw)) {
-      const n = Number(ts);
-      if (Number.isFinite(n) && n >= FORCE_RESCRAPE_CUTOFF_LOCAL_DAY_MS) {
-        filtered[k] = n;
-      }
-    }
-    return filtered;
-  } catch (_) {
-    return {};
-  }
-}
-
-async function markJobDeskVisitedPersistent(key) {
-  if (!key || !chrome?.storage?.local) return;
-  try {
-    const r = await chrome.storage.local.get(STORAGE_KEY_JOB_DESK_VISITED);
-    const obj = { ...(r[STORAGE_KEY_JOB_DESK_VISITED] || {}) };
-    obj[key] = Date.now();
-    const keys = Object.keys(obj);
-    if (keys.length > MAX_VISITED_JOB_DESK_KEYS) {
-      keys.sort((a, b) => (obj[a] || 0) - (obj[b] || 0));
-      const drop = keys.length - Math.floor(MAX_VISITED_JOB_DESK_KEYS * 0.85);
-      for (let i = 0; i < drop; i++) delete obj[keys[i]];
-    }
-    await chrome.storage.local.set({ [STORAGE_KEY_JOB_DESK_VISITED]: obj });
-  } catch (_) {}
 }
 
 function getJobCardWrapperFromEventTarget(target) {
@@ -339,9 +363,7 @@ function attachUserClickJobdeskScrape() {
     (event) => {
       const wrapper = getJobCardWrapperFromEventTarget(event.target);
       if (!wrapper) return;
-      const k = dedupeKeyForCard(wrapper);
-      if (k) void markJobDeskVisitedPersistent(k);
-      scheduleJobOfferScrape(wrapper);
+      scheduleJobOfferScrape(wrapper, { o: 'u' });
     },
     true
   );

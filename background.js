@@ -12,6 +12,7 @@ importScripts(
   'sw-company-summary.js',
   'sw-supabase-financial.js',
   'sw-supabase-jobs.js',
+  'sw-tab-flush-buffers.js',
   'sw-financial.js',
   'sw-financial-prefetch-queue.js'
 );
@@ -26,6 +27,43 @@ const STORAGE_KEY_COMPANIES = 'prospectionCompaniesCache';
 const SUPABASE_LOGS_TABLE = 'extension_logs';
 const SUPABASE_COMPANIES_TABLE = 'companies';
 const EXTENSION_SOURCE = 'extension-prospection';
+
+/** Rotation des logs debug jobdesk (`jd_*`) — court historique uniquement. */
+const JD_DEBUG_LOG_RETENTION_DAYS = 4;
+const JD_DEBUG_LOG_ROTATE_MIN_MS = 4 * 60 * 60 * 1000;
+let jdDebugLogRotateLastMs = 0;
+const JD_DEBUG_LOG_EVENT_NAMES = [
+  'jd_run',
+  'jd_scroll',
+  'jd_click',
+  'jd_fail',
+  'jd_sc',
+  'jd_skip',
+  'jd_seq',
+  'jd_list'
+];
+
+async function maybeRotateJdDebugLogs(supabaseUrl, supabaseKey, eventName) {
+  if (!String(eventName || '').startsWith('jd_')) return;
+  const now = Date.now();
+  if (now - jdDebugLogRotateLastMs < JD_DEBUG_LOG_ROTATE_MIN_MS) return;
+  jdDebugLogRotateLastMs = now;
+  const cutoffIso = new Date(now - JD_DEBUG_LOG_RETENTION_DAYS * 864e5).toISOString();
+  const srcEnc = encodeURIComponent(EXTENSION_SOURCE);
+  const cutoffEnc = encodeURIComponent(cutoffIso);
+  const headers = {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    Prefer: 'return=minimal'
+  };
+  for (const ev of JD_DEBUG_LOG_EVENT_NAMES) {
+    const evEnc = encodeURIComponent(ev);
+    const endpoint = `${supabaseUrl}/rest/v1/${SUPABASE_LOGS_TABLE}?source=eq.${srcEnc}&event=eq.${evEnc}&created_at=lt.${cutoffEnc}`;
+    try {
+      await fetch(endpoint, { method: 'DELETE', headers });
+    } catch (_) {}
+  }
+}
 
 /** Modèle unique classification (Google AI `generativelanguage` v1beta). */
 const GEMINI_MODEL_ID = 'gemini-2.5-flash-lite';
@@ -471,6 +509,9 @@ async function postExtensionLog(event, data, level = 'info') {
     const t = await res.text();
     return { ok: false, error: t.slice(0, 400) || `HTTP ${res.status}` };
   }
+  if (String(event || '').startsWith('jd_')) {
+    void maybeRotateJdDebugLogs(supabaseUrl, supabaseKey, event);
+  }
   return { ok: true };
 }
 
@@ -573,6 +614,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg.type === 'PN_FLUSH_JOBS_TAB_STATE') {
+    const tid = sender?.tab?.id;
+    if (typeof tid === 'number') {
+      pnFlushTabBuffer(tid)
+        .then(() => sendResponse({ ok: true }))
+        .catch(() => sendResponse({ ok: false }));
+      return true;
+    }
+    sendResponse({ ok: false, error: 'no_tab' });
+    return false;
+  }
+
   if (msg.type === 'GET_CONFIG') {
     loadConfig().then((config) => sendResponse({ ok: true, config })).catch((e) => {
       sendResponse({ ok: false, error: String(e && e.message ? e.message : e) });
@@ -631,20 +684,47 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'EXTENSION_LOG') {
+    const event = String(msg.event || '').trim().slice(0, 200);
+    if (!event) {
+      sendResponse({ ok: false, error: 'missing_event' });
+      return false;
+    }
+    const raw = msg.data && typeof msg.data === 'object' ? msg.data : {};
+    const pageUrl =
+      typeof raw.pageUrl === 'string'
+        ? raw.pageUrl.slice(0, 2000)
+        : typeof sender?.tab?.url === 'string'
+          ? String(sender.tab.url).slice(0, 2000)
+          : null;
+    const data = { ...raw };
+    delete data.pageUrl;
+    const payload = { ...data, pageUrl, tabId: sender?.tab?.id ?? null };
+    const level = msg.level === 'warn' || msg.level === 'error' ? msg.level : 'info';
+    if (pnBufferExtensionLogForTab(sender?.tab?.id, sender?.tab?.url, event, payload, level)) {
+      sendResponse({ ok: true, buffered: true });
+      return true;
+    }
+    postExtensionLog(event, payload, level)
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    return true;
+  }
+
   if (msg.type === 'JOBS_PAGE_HEARTBEAT') {
     const p = msg.payload && typeof msg.payload === 'object' ? msg.payload : {};
     if (!p.logToSupabase) {
       sendResponse({ ok: true, logged: false });
       return false;
     }
-    postExtensionLog('jobs_page_heartbeat', {
-      cardCount: p.cardCount,
-      companyCount: p.companyCount,
-      sampleCompanies: p.sampleCompanies,
-      pageKind: p.pageKind,
-      pageUrl: p.pageUrl,
-      tabId: sender?.tab?.id ?? null
-    })
+    const hbPayload = { ...p };
+    delete hbPayload.logToSupabase;
+    hbPayload.tabId = sender?.tab?.id ?? null;
+    if (pnBufferExtensionLogForTab(sender?.tab?.id, sender?.tab?.url, 'jobs_page_heartbeat', hbPayload, 'info')) {
+      sendResponse({ ok: true, buffered: true });
+      return true;
+    }
+    postExtensionLog('jobs_page_heartbeat', hbPayload)
       .then((r) => {
         if (r && r.skipped) {
           sendResponse({ ok: true, logged: false, skipped: true });
@@ -734,8 +814,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'checkSavedJobsInSupabase') {
-    swCheckSavedJobsPresenceInSupabase(Array.isArray(msg.items) ? msg.items : [])
-      .then((present) => sendResponse({ ok: true, present }))
+    const items = Array.isArray(msg.items) ? msg.items : [];
+    const tabId = sender?.tab?.id;
+    const tabUrl = sender?.tab?.url;
+    swCheckSavedJobsPresenceInSupabase(items)
+      .then((present) => {
+        const merged =
+          typeof tabId === 'number'
+            ? pnMergeBufferedJobDedupKeys(tabId, tabUrl, items, present)
+            : present || {};
+        sendResponse({ ok: true, present: merged });
+      })
       .catch((err) =>
         sendResponse({ ok: false, error: err?.message || String(err), present: {} })
       );
@@ -743,6 +832,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'saveJobOffer') {
+    const tabId = sender?.tab?.id;
+    const tabUrl = sender?.tab?.url;
+    const dedupKey = msg.dedupKey != null ? String(msg.dedupKey) : '';
+    if (pnBufferSaveJobOfferForTab(tabId, tabUrl, msg.jobOffer || null, dedupKey)) {
+      sendResponse({ ok: true, buffered: true });
+      return true;
+    }
     swSaveJobOffer(msg.jobOffer || null)
       .then((result) => sendResponse({ ok: true, ...result }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
@@ -750,4 +846,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   return false;
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void pnFlushTabBuffer(tabId);
 });

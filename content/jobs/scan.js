@@ -31,15 +31,31 @@ function buildScanPayload() {
   const timing = pnNotifyScanStep(cards.length, collectMs, extractCompaniesMs);
   const classifyExtra = pnConsumeLastClassificationForPayload();
 
+  const clientIds = [];
+  try {
+    for (const w of querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`)) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
+      const { jobUrl } = getJobInfoFromWrapper(w);
+      const jid = getJobIdFromWrapper(w, jobUrl) || '';
+      if (!jid || clientIds.includes(jid)) continue;
+      clientIds.push(jid);
+      if (clientIds.length >= 14) break;
+    }
+  } catch (_) {}
+  let clientJobSample = clientIds.join(',');
+  if (clientJobSample.length > 180) clientJobSample = clientJobSample.slice(0, 180);
+
   return {
     cardCount: cards.length,
     companyCount: companies.length,
-    sampleCompanies: companies.slice(0, 8),
+    sampleCompanies: companies.slice(0, 6),
     pageKind: isJobsCollectionsPath() ? 'collections' : 'search-results',
     collectMs: timing.collectMs,
     extractCompaniesMs: timing.extractCompaniesMs,
     msToFirstNonzeroCards: timing.msToFirstNonzeroCards,
     msSincePathSegment: timing.msSincePathSegment,
+    clientJobSample,
+    clientJobCount: clientIds.length,
     ...(classifyExtra || {})
   };
 }

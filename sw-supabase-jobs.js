@@ -4,21 +4,7 @@
  * et sanitizeForPostgres (sw-supabase-financial.js).
  */
 const SW_SUPABASE_JOBS_TABLE = 'saved_jobs';
-const STORAGE_KEY_JOB_OFFERS = 'pnJobOffersCache';
 const FORCE_RESCRAPE_CUTOFF_ISO = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
-
-function normalizeTextKey(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function buildJobOfferStorageKey(jobOffer) {
-  return normalizeTextKey(jobOffer?.linkedinJobId || jobOffer?.jobUrl || `${jobOffer?.companyName || ''}::${jobOffer?.jobTitle || ''}`);
-}
-
-async function swGetJobOffersCache() {
-  const result = await chrome.storage.local.get(STORAGE_KEY_JOB_OFFERS);
-  return result[STORAGE_KEY_JOB_OFFERS] || {};
-}
 
 function swMergeLinkedinData(existingData, incomingData) {
   return sanitizeForPostgres({
@@ -60,29 +46,6 @@ async function swFetchExistingSavedJobRow(url, headers, lookupClauses) {
 function swIsDuplicateConstraintError(text) {
   const s = String(text || '').toLowerCase();
   return s.includes('duplicate key value') || s.includes('unique constraint');
-}
-
-async function swSaveJobOfferLocally(jobOffer) {
-  const key = buildJobOfferStorageKey(jobOffer);
-  if (!key) return { ok: false, error: 'Job offer key introuvable' };
-  const cache = await swGetJobOffersCache();
-  const existing = cache[key] || {};
-  cache[key] = sanitizeForPostgres({
-    ...existing,
-    ...jobOffer,
-    companyType: jobOffer?.companyType || existing?.companyType || null,
-    location: jobOffer?.location || existing?.location || null,
-    descriptionText: jobOffer?.descriptionText || existing?.descriptionText || null,
-    firstSeenAt: existing?.firstSeenAt || jobOffer?.seenAt || new Date().toISOString(),
-    lastSeenAt: jobOffer?.seenAt || existing?.lastSeenAt || new Date().toISOString(),
-    detailsScrapedAt: jobOffer?.detailsScrapedAt || existing?.detailsScrapedAt || null,
-    linkedinData: swMergeLinkedinData(existing?.linkedinData, jobOffer?.linkedinData || {
-      card: jobOffer?.cardData || null
-    }),
-    updatedAt: new Date().toISOString()
-  });
-  await chrome.storage.local.set({ [STORAGE_KEY_JOB_OFFERS]: cache });
-  return { ok: true, key };
 }
 
 async function swUpsertJobOfferToSupabase(jobOffer) {
@@ -199,12 +162,11 @@ async function swSaveJobOffer(jobOffer) {
   if (!jobOffer?.companyName) {
     throw new Error('Offre incomplète: companyName est requis');
   }
-  const local = await swSaveJobOfferLocally(jobOffer);
   const supabase = await swUpsertJobOfferToSupabase(jobOffer);
   if (!supabase.ok) {
     console.warn('[Prospection BG] Sauvegarde job Supabase KO:', supabase.error);
   }
-  return { local, supabase };
+  return { supabase };
 }
 
 function swNormalizeJobUrlForSupabaseMatch(u) {
@@ -243,6 +205,42 @@ async function swCheckSavedJobsPresenceInSupabase(items) {
   };
 
   const usable = items.filter((it) => it?.dedupKey && (it.linkedinJobId || it.jobUrl));
+  const allWithLinkedinIdOnly =
+    usable.length > 0 && usable.every((it) => it?.linkedinJobId && (!it?.jobUrl || String(it.jobUrl).trim() === ''));
+
+  // Fast path: one Supabase request for the whole page when we only match by linkedin_job_id.
+  if (allWithLinkedinIdOnly) {
+    const byId = new Map();
+    for (const it of usable) {
+      const id = String(it.linkedinJobId || '').trim();
+      if (!id) continue;
+      if (!byId.has(id)) byId.set(id, []);
+      byId.get(id).push(it.dedupKey);
+    }
+    const ids = Array.from(byId.keys());
+    if (ids.length > 0) {
+      const idsEncoded = ids.map((id) => encodeURIComponent(id)).join(',');
+      try {
+        const res = await fetch(
+          `${baseUrl}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?select=linkedin_job_id,job_url,details_scraped_at,description_text,needs_rescrape,created_at,updated_at&linkedin_job_id=in.(${idsEncoded})`,
+          { method: 'GET', headers }
+        );
+        if (res.ok) {
+          const rowList = await res.json();
+          if (Array.isArray(rowList)) {
+            for (const row of rowList) {
+              if (!swSavedJobRowHasCompleteJobDesk(row)) continue;
+              const rowId = row?.linkedin_job_id != null ? String(row.linkedin_job_id) : '';
+              const dedupKeys = byId.get(rowId) || [];
+              for (const k of dedupKeys) out[k] = true;
+            }
+            return out;
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
   const chunkSize = 12;
   for (let c = 0; c < usable.length; c += chunkSize) {
     const chunk = usable.slice(c, c + chunkSize);

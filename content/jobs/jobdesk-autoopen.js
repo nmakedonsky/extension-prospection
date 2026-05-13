@@ -8,6 +8,334 @@ const AUTO_OPEN_MIN_GAP_MS = 900;
 const AUTO_OPEN_AFTER_CLIENT_MS = 700;
 const MAX_CLIENT_AUTO_OPEN_QUEUE = 400;
 
+/** Dernière raison d’invocation auto-open (scroll, init, etc.) pour les logs `jd_*`. */
+let lastJdRunReason = '';
+let __jdLastScrollLogAt = 0;
+const JD_SCROLL_LOG_MS = 22000;
+let __jdAwaitFullScrollLogAt = 0;
+const JD_AWAIT_FULL_SCROLL_LOG_MS = 8000;
+
+/** Clé de liste (URL sans `currentJobId`) → IDs Client vus au scroll (virtualisation LinkedIn). */
+const JD_SEEN_CLIENT_IDS_BY_LIST_KEY = new Map();
+/** Dernière clé de liste pour laquelle on a fusionné le DOM — sert à détecter un changement d’URL liste. */
+let jdMergeLastLk = '';
+const JD_LIST_IDS_CHUNK_CHARS = 7500;
+/** Après changement de liste (SPA), vider le tampon background : `pagehide` ne part pas toujours sur LinkedIn. */
+const JD_NAV_SUPABASE_FLUSH_MS = 750;
+let jobsTabSupabaseFlushTimer = null;
+const JD_SCROLL_BOTTOM_EPSILON_PX = 28;
+const JD_SCROLL_ROOT_SELECTORS = [
+  '.jobs-search-results-list',
+  '[class*="jobs-search-results-list"]',
+  '.jobs-search-two-pane__results',
+  '[class*="jobs-search-two-pane__results"]',
+  '.scaffold-layout__list',
+  '[class*="scaffold-layout__list"]',
+  'main[role="main"]'
+];
+const JD_FULLY_SCROLLED_LIST_KEYS = new Set();
+const JD_OPENED_CLIENT_IDS_BY_LIST_KEY = new Map();
+const JD_LIST_KEYS_SEEN_NOT_BOTTOM = new Set();
+const JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY = new Set();
+
+function scheduleJobsTabSupabaseFlush() {
+  if (jobsTabSupabaseFlushTimer) clearTimeout(jobsTabSupabaseFlushTimer);
+  jobsTabSupabaseFlushTimer = setTimeout(() => {
+    jobsTabSupabaseFlushTimer = null;
+    try {
+      sendRuntimeMessageSafe({ type: 'PN_FLUSH_JOBS_TAB_STATE' }, () => {});
+    } catch (_) {}
+  }, JD_NAV_SUPABASE_FLUSH_MS);
+}
+
+function jdListPageKey() {
+  try {
+    const u = new URL(location.href);
+    const sp = new URLSearchParams(u.search);
+    sp.delete('currentJobId');
+    const qs = sp.toString();
+    return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
+  } catch (_) {
+    return '';
+  }
+}
+
+function jdPruneSeenIdsMap() {
+  while (JD_SEEN_CLIENT_IDS_BY_LIST_KEY.size > 10) {
+    const k = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.keys().next().value;
+    if (k != null) JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(k);
+  }
+}
+
+function jdPruneSmallSet(s, max = 12) {
+  while (s.size > max) {
+    const k = s.keys().next().value;
+    if (k != null) s.delete(k);
+  }
+}
+
+function jdClearListGatingState(lk) {
+  if (!lk) return;
+  JD_FULLY_SCROLLED_LIST_KEYS.delete(lk);
+  JD_LIST_KEYS_SEEN_NOT_BOTTOM.delete(lk);
+  JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY.delete(lk);
+}
+
+function jdPruneOpenedIdsMap() {
+  while (JD_OPENED_CLIENT_IDS_BY_LIST_KEY.size > 12) {
+    const k = JD_OPENED_CLIENT_IDS_BY_LIST_KEY.keys().next().value;
+    if (k != null) JD_OPENED_CLIENT_IDS_BY_LIST_KEY.delete(k);
+  }
+}
+
+function jdGetOpenedIdsSetForListKey(lk) {
+  if (!lk) return new Set();
+  if (!JD_OPENED_CLIENT_IDS_BY_LIST_KEY.has(lk)) {
+    jdPruneOpenedIdsMap();
+    JD_OPENED_CLIENT_IDS_BY_LIST_KEY.set(lk, new Set());
+  }
+  return JD_OPENED_CLIENT_IDS_BY_LIST_KEY.get(lk);
+}
+
+function jdIsScrollableElement(el) {
+  if (!el || !el.getBoundingClientRect) return false;
+  try {
+    const style = window.getComputedStyle(el);
+    const ovy = String(style?.overflowY || '');
+    const canScroll = ovy === 'auto' || ovy === 'scroll' || ovy === 'overlay';
+    return canScroll && el.scrollHeight - el.clientHeight > 40;
+  } catch (_) {
+    return false;
+  }
+}
+
+function jdFindScrollableAncestor(el) {
+  let n = el?.parentElement || null;
+  while (n && n !== document.body && n !== document.documentElement) {
+    if (jdIsScrollableElement(n)) return n;
+    n = n.parentElement;
+  }
+  return null;
+}
+
+function jdGetLikelyJobsListScrollRoot() {
+  for (const sel of JD_SCROLL_ROOT_SELECTORS) {
+    let nodes = [];
+    try {
+      nodes = querySelectorAllDeep(document, sel) || [];
+    } catch (_) {
+      nodes = [];
+    }
+    for (const el of nodes) {
+      if (!jdIsScrollableElement(el)) continue;
+      if (typeof isInLeftJobListColumn === 'function' && !isInLeftJobListColumn(el)) continue;
+      return el;
+    }
+  }
+  const cards = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`) || [];
+  for (const card of cards) {
+    if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(card)) continue;
+    const root = jdFindScrollableAncestor(card);
+    if (root) return root;
+  }
+  return null;
+}
+
+function jdHasReachedBottomForCurrentList() {
+  const root = jdGetLikelyJobsListScrollRoot();
+  if (root) {
+    const dist = root.scrollHeight - (root.scrollTop + root.clientHeight);
+    return dist <= JD_SCROLL_BOTTOM_EPSILON_PX;
+  }
+  try {
+    const de = document.documentElement;
+    const db = document.body;
+    const scrollTop = window.scrollY || de?.scrollTop || db?.scrollTop || 0;
+    const clientHeight = window.innerHeight || de?.clientHeight || 0;
+    const scrollHeight = Math.max(de?.scrollHeight || 0, db?.scrollHeight || 0);
+    return scrollHeight - (scrollTop + clientHeight) <= JD_SCROLL_BOTTOM_EPSILON_PX;
+  } catch (_) {
+    return false;
+  }
+}
+
+function jdIsCurrentListFullyScrolled() {
+  const lk = jdListPageKey();
+  if (!lk) return true;
+  return JD_FULLY_SCROLLED_LIST_KEYS.has(lk);
+}
+
+function jdTrackCurrentListScrollProgress() {
+  const lk = jdListPageKey();
+  if (!lk) return;
+  const root = jdGetLikelyJobsListScrollRoot();
+  let isBottom = false;
+  let sawScrollActivity = false;
+  if (root) {
+    const dist = root.scrollHeight - (root.scrollTop + root.clientHeight);
+    isBottom = dist <= JD_SCROLL_BOTTOM_EPSILON_PX;
+    sawScrollActivity = root.scrollTop > 10;
+  } else {
+    try {
+      const de = document.documentElement;
+      const db = document.body;
+      const scrollTop = window.scrollY || de?.scrollTop || db?.scrollTop || 0;
+      const clientHeight = window.innerHeight || de?.clientHeight || 0;
+      const scrollHeight = Math.max(de?.scrollHeight || 0, db?.scrollHeight || 0);
+      isBottom = scrollHeight - (scrollTop + clientHeight) <= JD_SCROLL_BOTTOM_EPSILON_PX;
+      sawScrollActivity = scrollTop > 10;
+    } catch (_) {
+      return;
+    }
+  }
+  if (!isBottom) JD_LIST_KEYS_SEEN_NOT_BOTTOM.add(lk);
+  if (sawScrollActivity) JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY.add(lk);
+}
+
+function jdCanMarkCurrentListFullyScrolled() {
+  const lk = jdListPageKey();
+  if (!lk) return false;
+  if (!jdHasReachedBottomForCurrentList()) return false;
+  return JD_LIST_KEYS_SEEN_NOT_BOTTOM.has(lk) && JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY.has(lk);
+}
+
+function jdMarkCurrentListFullyScrolled(reason = '') {
+  const lk = jdListPageKey();
+  if (!lk) return false;
+  if (JD_FULLY_SCROLLED_LIST_KEYS.has(lk)) return false;
+  jdPruneSmallSet(JD_FULLY_SCROLLED_LIST_KEYS, 12);
+  JD_FULLY_SCROLLED_LIST_KEYS.add(lk);
+  jdLog('jd_gate', { lk, y: 'open', r: String(reason || '').slice(0, 60) });
+  return true;
+}
+
+function jdLogAwaitFullScroll(reason = '') {
+  const now = Date.now();
+  if (now - __jdAwaitFullScrollLogAt < JD_AWAIT_FULL_SCROLL_LOG_MS) return;
+  __jdAwaitFullScrollLogAt = now;
+  jdLog('jd_skip', { y: 'await_full_scroll', r: String(reason || '').slice(0, 80) });
+}
+
+/** Tous les jobs Client actuellement présents dans le DOM (colonne liste). */
+function harvestAllClientJobIdsInListColumn() {
+  const ids = [];
+  const seen = new Set();
+  try {
+    const nodes = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`);
+    for (const w of nodes) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
+      const { jobUrl } = getJobInfoFromWrapper(w);
+      const id = getJobIdFromWrapper(w, jobUrl) || '';
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+  } catch (_) {}
+  return ids;
+}
+
+function mergeSeenClientJobsFromDom() {
+  const lk = jdListPageKey();
+  if (!lk) {
+    if (jdMergeLastLk) {
+      flushAccumulatedClientJobIdsForListKey(jdMergeLastLk, 'left-jobs-list');
+      jdClearListGatingState(jdMergeLastLk);
+      jdMergeLastLk = '';
+      scheduleJobsTabSupabaseFlush();
+    }
+    return;
+  }
+  let listKeyChanged = false;
+  if (jdMergeLastLk && jdMergeLastLk !== lk) {
+    flushAccumulatedClientJobIdsForListKey(jdMergeLastLk, 'list-url-changed');
+    jdClearListGatingState(jdMergeLastLk);
+    listKeyChanged = true;
+  }
+  if (!JD_SEEN_CLIENT_IDS_BY_LIST_KEY.has(lk)) {
+    jdPruneSeenIdsMap();
+    JD_SEEN_CLIENT_IDS_BY_LIST_KEY.set(lk, new Set());
+  }
+  const set = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.get(lk);
+  for (const id of harvestAllClientJobIdsInListColumn()) set.add(id);
+  jdMergeLastLk = lk;
+  if (listKeyChanged) scheduleJobsTabSupabaseFlush();
+}
+
+/** Envoie une fois vers Supabase la liste cumulée pour `lk`, puis vide l’entrée locale (peu de requêtes). */
+function flushAccumulatedClientJobIdsForListKey(lk, reason) {
+  if (!lk) return;
+  const set = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.get(lk);
+  if (!set || set.size === 0) {
+    JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(lk);
+    return;
+  }
+  const sorted = Array.from(set).sort();
+  const joined = sorted.join(',');
+  const n = sorted.length;
+  const r = String(reason || '').slice(0, 60);
+  if (joined.length <= JD_LIST_IDS_CHUNK_CHARS) {
+    jdLog('jd_list', { lk, n, r, ids: joined });
+  } else {
+    const pt = Math.ceil(joined.length / JD_LIST_IDS_CHUNK_CHARS);
+    for (let pi = 0; pi < pt; pi++) {
+      const chunk = joined.slice(pi * JD_LIST_IDS_CHUNK_CHARS, (pi + 1) * JD_LIST_IDS_CHUNK_CHARS);
+      jdLog('jd_list', { lk, n, r, pi, pt, ids: chunk });
+    }
+  }
+  JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(lk);
+}
+
+function jdPageKey() {
+  try {
+    const u = new URL(location.href);
+    const st = u.searchParams.get('start') || '0';
+    const cj = u.searchParams.get('currentJobId') || '';
+    return `${u.pathname}|st=${st}|cj=${cj}`.slice(0, 200);
+  } catch (_) {
+    return '';
+  }
+}
+
+function jdClientIdsSample(maxN = 16, maxChars = 200) {
+  const out = [];
+  try {
+    const nodes = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`);
+    for (const w of nodes) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
+      const { jobUrl } = getJobInfoFromWrapper(w);
+      const id = getJobIdFromWrapper(w, jobUrl) || '';
+      if (!id || out.includes(id)) continue;
+      out.push(id);
+      if (out.length >= maxN) break;
+    }
+  } catch (_) {}
+  let s = out.join(',');
+  if (s.length > maxChars) s = s.slice(0, maxChars);
+  return { n: out.length, s };
+}
+
+function jdLog(event, payload) {
+  try {
+    const ev = String(event || '');
+    const base = payload && typeof payload === 'object' ? payload : {};
+    const lkVal = ev.startsWith('jd_') ? jdListPageKey() : '';
+    sendRuntimeMessageSafe(
+      {
+        type: 'EXTENSION_LOG',
+        event: ev.slice(0, 200),
+        level: 'info',
+        data: {
+          ...base,
+          pk: jdPageKey(),
+          ...(lkVal ? { lk: lkVal } : {}),
+          t: Date.now()
+        }
+      },
+      () => {}
+    );
+  } catch (_) {}
+}
+
 const autoOpenedClientJobKeys = new Set();
 const clientJobOpenQueueOrder = [];
 const clientJobOpenQueueSet = new Set();
@@ -235,13 +563,6 @@ function dequeueClientJobOpenKey(k) {
   if (idx >= 0) clientJobOpenQueueOrder.splice(idx, 1);
 }
 
-function pruneClientJobOpenQueueFromVisited(visited) {
-  if (!visited || typeof visited !== 'object') return;
-  for (const k of [...clientJobOpenQueueOrder]) {
-    if (visited[k]) dequeueClientJobOpenKey(k);
-  }
-}
-
 function pruneClientJobOpenQueueFromPresentComplete(present) {
   if (!present || typeof present !== 'object') return;
   for (const k of [...clientJobOpenQueueOrder]) {
@@ -296,6 +617,39 @@ function querySavedJobsPresenceFromBackground(items) {
   });
 }
 
+function getSeenClientJobIdsForListKey(lk) {
+  if (!lk) return [];
+  const set = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.get(lk);
+  if (!set || set.size === 0) return [];
+  return Array.from(set)
+    .map((v) => String(v || '').trim())
+    .filter(Boolean)
+    .sort();
+}
+
+async function getPendingClientJobIdsForCurrentList() {
+  const lk = jdListPageKey();
+  if (!lk) return { lk: '', ids: [], presentCount: 0, totalSeen: 0 };
+  const seenIds = getSeenClientJobIdsForListKey(lk);
+  if (!seenIds.length) return { lk, ids: [], presentCount: 0, totalSeen: 0 };
+
+  const opened = jdGetOpenedIdsSetForListKey(lk);
+  const baseIds = seenIds.filter((id) => !opened.has(id));
+  if (!baseIds.length) return { lk, ids: [], presentCount: 0, totalSeen: seenIds.length };
+
+  const lookupItems = baseIds.map((id) => ({ dedupKey: `jid:${id}`, linkedinJobId: id }));
+  const present = await querySavedJobsPresenceFromBackground(lookupItems);
+  let presentCount = 0;
+  for (const id of baseIds) {
+    if (present[`jid:${id}`]) {
+      opened.add(id);
+      presentCount += 1;
+    }
+  }
+  const ids = baseIds.filter((id) => !present[`jid:${id}`]);
+  return { lk, ids, presentCount, totalSeen: seenIds.length };
+}
+
 let openClientJobsSequenceRunning = false;
 let autoOpenCoalesceTimer = null;
 let autoOpenRunQueued = false;
@@ -308,12 +662,17 @@ let deferredAutoOpenWhileTabHidden = false;
 function requestAutoOpenRun(reason = '') {
   const now = Date.now();
   if (now < autoOpenDisabledUntil) return;
+  lastJdRunReason = String(reason || '').slice(0, 80);
   if (!pnTabVisibleForAutoOpen()) {
     deferredAutoOpenWhileTabHidden = true;
     return;
   }
   if (openClientJobsSequenceRunning) {
     autoOpenRunQueued = true;
+    return;
+  }
+  if (!jdIsCurrentListFullyScrolled()) {
+    jdLogAwaitFullScroll(lastJdRunReason);
     return;
   }
   if (autoOpenCoalesceTimer) return;
@@ -343,19 +702,69 @@ async function tryAutoOpenNewVisibleClientJobs() {
     autoOpenRunQueued = true;
     return;
   }
-  const visited = await getVisitedJobDeskMap();
-  pruneClientJobOpenQueueFromVisited(visited);
+  mergeSeenClientJobsFromDom();
+  if (!jdIsCurrentListFullyScrolled()) {
+    jdLogAwaitFullScroll(lastJdRunReason);
+    return;
+  }
+
+  const pendingById = await getPendingClientJobIdsForCurrentList();
+  if (pendingById.ids.length > 0) {
+    openClientJobsSequenceRunning = true;
+    let batchOpened = 0;
+    try {
+      for (let i = 0; i < pendingById.ids.length; i++) {
+        if (!pnTabVisibleForAutoOpen()) {
+          deferredAutoOpenWhileTabHidden = true;
+          autoOpenRunQueued = true;
+          break;
+        }
+        const jid = pendingById.ids[i];
+        const opened = syncUrlCurrentJobId(jid);
+        if (opened) {
+          jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
+          scheduleJobOfferScrape(null, { o: 'a' });
+          batchOpened += 1;
+          jdLog('jd_click', { jid, i, m: pendingById.ids.length, r: `${lastJdRunReason}|id-pass` });
+        } else {
+          jdLog('jd_fail', { jid, m: 'open-by-id', i, r: lastJdRunReason });
+        }
+        if (i < pendingById.ids.length - 1) {
+          const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsBetweenClientClicks());
+          if (!stillHere) {
+            deferredAutoOpenWhileTabHidden = true;
+            autoOpenRunQueued = true;
+            break;
+          }
+        }
+      }
+    } finally {
+      jdLog('jd_seq', {
+        cl: batchOpened,
+        tot: pendingById.ids.length,
+        r: `${lastJdRunReason}|id-pass`,
+        sb: pendingById.presentCount,
+        vi: pendingById.totalSeen
+      });
+      openClientJobsSequenceRunning = false;
+      if (autoOpenRunQueued) {
+        autoOpenRunQueued = false;
+        requestAutoOpenRun('queued-after-running');
+      }
+    }
+    return;
+  }
 
   const cards = buildMergedClientCardsForAutoOpen();
   const pending = cards.filter((w) => {
     const k = dedupeKeyForCard(w);
     if (!k) return false;
-    if (visited[k]) return false;
     if (autoOpenedClientJobKeys.has(k)) return false;
     return true;
   });
 
   if (pending.length === 0) {
+    jdLog('jd_skip', { y: 'no_pending', r: lastJdRunReason });
     return;
   }
 
@@ -368,7 +777,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
 
   for (const it of lookupItems) {
     if (present[it.dedupKey]) {
-      void markJobDeskVisitedPersistent(it.dedupKey);
+      autoOpenedClientJobKeys.add(it.dedupKey);
     }
   }
 
@@ -377,11 +786,24 @@ async function tryAutoOpenNewVisibleClientJobs() {
     return k && !present[k];
   });
 
+  const sample = jdClientIdsSample(20, 220);
+  jdLog('jd_run', {
+    r: lastJdRunReason,
+    n: pending.length,
+    q: lookupItems.length,
+    sb: Object.keys(present || {}).length,
+    o: pendingToOpen.length,
+    ids: sample.s,
+    vi: sample.n
+  });
+
   if (pendingToOpen.length === 0) {
+    jdLog('jd_skip', { y: 'all_sb', r: lastJdRunReason, n: pending.length });
     return;
   }
 
   openClientJobsSequenceRunning = true;
+  let batchOpened = 0;
   try {
     for (let i = 0; i < pendingToOpen.length; i++) {
       if (!pnTabVisibleForAutoOpen()) {
@@ -393,13 +815,23 @@ async function tryAutoOpenNewVisibleClientJobs() {
       if (!wrapper.isConnected) continue;
       const k = dedupeKeyForCard(wrapper);
       if (!k || autoOpenedClientJobKeys.has(k)) continue;
+      const jid = resolveJobIdForOpen(wrapper) || '';
       const opened = performAutoOpenClientJobActions(wrapper);
       if (opened) {
         saveJobCardSnapshot(wrapper);
-        scheduleJobOfferScrape(wrapper);
+        scheduleJobOfferScrape(wrapper, { o: 'a' });
         autoOpenedClientJobKeys.add(k);
         dequeueClientJobOpenKey(k);
-        void markJobDeskVisitedPersistent(k);
+        batchOpened += 1;
+        jdLog('jd_click', {
+          jid: String(jid),
+          lk: jdListPageKey() || undefined,
+          i,
+          m: pendingToOpen.length,
+          r: lastJdRunReason
+        });
+      } else {
+        jdLog('jd_fail', { jid: String(jid), k: String(k).slice(0, 80), m: 'open', i, r: lastJdRunReason });
       }
       if (i < pendingToOpen.length - 1) {
         const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsBetweenClientClicks());
@@ -411,6 +843,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
       }
     }
   } finally {
+    jdLog('jd_seq', { cl: batchOpened, tot: pendingToOpen.length, r: lastJdRunReason });
     openClientJobsSequenceRunning = false;
     if (autoOpenRunQueued) {
       autoOpenRunQueued = false;
@@ -428,10 +861,26 @@ function debounce(fn, ms) {
 }
 
 const debouncedAutoOpenClientJobs = debounce(() => {
+  mergeSeenClientJobsFromDom();
+  jdTrackCurrentListScrollProgress();
+  if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('scroll-debounce')) {
+    requestAutoOpenRun('full-scroll-ready');
+  }
+  const now = Date.now();
+  if (now - __jdLastScrollLogAt >= JD_SCROLL_LOG_MS) {
+    __jdLastScrollLogAt = now;
+    const sample = jdClientIdsSample(18, 200);
+    jdLog('jd_scroll', { ids: sample.s, n: sample.n, r: 'scroll-debounce' });
+  }
   requestAutoOpenRun('scroll-debounce');
 }, 650);
 
 const debouncedAutoOpenOnMutation = debounce(() => {
+  mergeSeenClientJobsFromDom();
+  jdTrackCurrentListScrollProgress();
+  if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('dom-mutation')) {
+    requestAutoOpenRun('full-scroll-ready');
+  }
   requestAutoOpenRun('dom-mutation');
 }, 850);
 
@@ -447,6 +896,7 @@ function installPnHistoryAutoOpenListener() {
       if (typeof orig !== 'function') return;
       history[name] = function (...args) {
         const r = orig.apply(this, args);
+        mergeSeenClientJobsFromDom();
         onPathChange();
         return r;
       };
@@ -454,7 +904,10 @@ function installPnHistoryAutoOpenListener() {
     wrap('pushState');
     wrap('replaceState');
   } catch (_) {}
-  window.addEventListener('popstate', onPathChange);
+  window.addEventListener('popstate', () => {
+    mergeSeenClientJobsFromDom();
+    onPathChange();
+  });
 }
 
 function attachAutoOpenScrollListeners() {
@@ -468,6 +921,11 @@ function attachAutoOpenScrollListeners() {
   document.addEventListener(
     'scrollend',
     () => {
+      mergeSeenClientJobsFromDom();
+      jdTrackCurrentListScrollProgress();
+      if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('scrollend')) {
+        requestAutoOpenRun('full-scroll-ready');
+      }
       requestAutoOpenRun('scrollend');
     },
     { passive: true, capture: true }
@@ -525,6 +983,20 @@ function installAutoOpenVisibilityListener() {
   attachAutoOpenScrollListeners();
   installAutoOpenMutationObserver();
   attachUserClickJobdeskScrape();
+
+  window.addEventListener(
+    'pagehide',
+    () => {
+      try {
+        mergeSeenClientJobsFromDom();
+        const lk = jdListPageKey();
+        flushAccumulatedClientJobIdsForListKey(lk, 'pagehide');
+        jdMergeLastLk = '';
+        sendRuntimeMessageSafe({ type: 'PN_FLUSH_JOBS_TAB_STATE' }, () => {});
+      } catch (_) {}
+    },
+    { capture: true }
+  );
 
   setTimeout(() => requestAutoOpenRun('init-3500'), 3500);
   setTimeout(() => requestAutoOpenRun('init-9500'), 9500);

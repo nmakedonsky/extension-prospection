@@ -1,5 +1,8 @@
 -- Requêtes utiles pour lire les logs émis par l’extension (table extension_logs).
 -- À exécuter dans Supabase : SQL Editor → New query → Run
+--
+-- Affichage des timestamps (created_at, etc.) en heure de Paris pour cette session :
+SET timezone = 'Europe/Paris';
 
 -- 1) Dernières entrées (toutes sources)
 SELECT id, source, level, event, page_url, tab_id, client_ts, created_at, data
@@ -45,3 +48,20 @@ WHERE source IN ('extension-prospection', 'extension-prospection-next')
   AND event = 'classification_failed'
 ORDER BY created_at DESC
 LIMIT 50;
+
+-- 7) Jobdesk auto-open / scrape (événements jd_* — payloads courts)
+SELECT created_at, event, page_url, data
+FROM extension_logs
+WHERE source IN ('extension-prospection', 'extension-prospection-next')
+  AND event LIKE 'jd_%'
+ORDER BY created_at DESC
+LIMIT 200;
+
+-- 8) Résumé jd_* sur 48h (comparer clics vs scrapes)
+SELECT event, COUNT(*) AS n
+FROM extension_logs
+WHERE source IN ('extension-prospection', 'extension-prospection-next')
+  AND event LIKE 'jd_%'
+  AND created_at > now() - interval '48 hours'
+GROUP BY event
+ORDER BY n DESC;
