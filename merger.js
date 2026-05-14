@@ -5,10 +5,24 @@
     return Number.isNaN(n) ? null : n;
   }
 
+  /** Plafond cohérent avec llmExtractor.js */
+  const MERGER_MONEY_MAX_ABS = 12e12;
+  const MERGER_MONEY_FIELDS = ['revenue', 'revenue_previous', 'ebitda', 'operating_cash_flow', 'free_cash_flow', 'market_cap'];
+
   function mergeFinancials(baseFinancials, llmFinancials) {
     const base = { ...(baseFinancials || {}) };
+
+    // Invalider les montants base hors plafond (données corrompues / mauvaise échelle ancienne)
+    MERGER_MONEY_FIELDS.forEach((k) => {
+      const v = Number(base[k]);
+      if (base[k] != null && (!Number.isFinite(v) || Math.abs(v) > MERGER_MONEY_MAX_ABS)) {
+        base[k] = null;
+      }
+    });
+
     const out = { ...base };
     const keys = [
+      'reporting_currency',
       'revenue',
       'revenue_previous',
       'ebitda',
@@ -33,6 +47,13 @@
     keys.forEach((k) => {
       if (out[k] == null && llmFinancials?.[k] != null) out[k] = llmFinancials[k];
     });
+
+    // Le LLM prime pour la devise s'il retourne une valeur reconnue (USD/EUR)
+    const llmCur = llmFinancials?.reporting_currency;
+    if (llmCur === 'USD' || llmCur === 'EUR') out.reporting_currency = llmCur;
+
+    const curRaw = out.reporting_currency != null ? String(out.reporting_currency).trim().toUpperCase() : '';
+    out.reporting_currency = curRaw === 'USD' ? 'USD' : curRaw === 'EUR' ? 'EUR' : null;
     out.revenue = toNumberOrNull(out.revenue);
     out.revenue_previous = toNumberOrNull(out.revenue_previous);
     out.ebitda = toNumberOrNull(out.ebitda);

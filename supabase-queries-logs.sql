@@ -65,3 +65,31 @@ WHERE source IN ('extension-prospection', 'extension-prospection-next')
   AND created_at > now() - interval '48 hours'
 GROUP BY event
 ORDER BY n DESC;
+
+-- 9) Reset CA corrompus : efface le cache financier des entreprises dont le CA dépasse 12 000 Md
+--    (données mal mises à l'échelle avec l'ancienne version du code)
+--    ⚠ Exécuter puis recharger LinkedIn pour déclencher un re-fetch Gemini
+UPDATE companies
+SET
+  financial_pipeline_cache     = NULL,
+  financial_pipeline_cache_at  = NULL,
+  unified_payload               = NULL,
+  llm_payload                   = NULL,
+  llm_updated_at                = NULL,
+  updated_at                    = NOW()
+WHERE
+  (unified_payload->'financials'->>'revenue')::numeric > 12000000000000  -- > 12 000 Md
+  OR (unified_payload->'financials'->>'market_cap')::numeric > 12000000000000;
+
+-- 10) Vérifier quelles entreprises ont été réinitialisées (avant exécution)
+SELECT company_name,
+       (unified_payload->'financials'->>'revenue')::numeric / 1e9   AS revenue_Md,
+       (unified_payload->'financials'->>'market_cap')::numeric / 1e9 AS mktcap_Md,
+       unified_payload->'financials'->>'reporting_currency'          AS currency
+FROM companies
+WHERE unified_payload IS NOT NULL
+  AND (
+    (unified_payload->'financials'->>'revenue')::numeric    > 12000000000000
+    OR (unified_payload->'financials'->>'market_cap')::numeric > 12000000000000
+  )
+ORDER BY (unified_payload->'financials'->>'revenue')::numeric DESC NULLS LAST;
