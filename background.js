@@ -845,6 +845,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === 'saveJobOfferAndConfirm') {
+    const jobOffer = msg.jobOffer || null;
+    swSaveJobOffer(jobOffer)
+      .then(async (result) => {
+        let persistedComplete = false;
+        try {
+          const linkedinJobId = String(jobOffer?.linkedinJobId || '').trim();
+          const jobUrl = String(jobOffer?.jobUrl || '').trim();
+          const probe = [{ dedupKey: '__confirm__', linkedinJobId: linkedinJobId || null, jobUrl: jobUrl || null }];
+          const present = await swCheckSavedJobsPresenceInSupabase(probe);
+          persistedComplete = !!present.__confirm__;
+        } catch (_) {}
+        sendResponse({ ok: true, persistedComplete, ...result });
+      })
+      .catch((err) => sendResponse({ ok: false, error: err.message, persistedComplete: false }));
+    return true;
+  }
+
   return false;
 });
 

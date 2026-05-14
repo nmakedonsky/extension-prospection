@@ -249,7 +249,8 @@ function getJobDeskReadyState(payload) {
   };
 }
 
-function pnSaveJobOfferToBackground(jobOffer, wrapper) {
+function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
+  const confirmComplete = !!opts?.confirmComplete;
   const fingerprint = JSON.stringify([
     jobOffer.stage || '',
     jobOffer.linkedinJobId || '',
@@ -259,11 +260,27 @@ function pnSaveJobOfferToBackground(jobOffer, wrapper) {
     jobOffer.location || '',
     jobOffer.descriptionText || ''
   ]);
-  if (fingerprint === lastSavedJobFingerprint) return;
+  if (!confirmComplete && fingerprint === lastSavedJobFingerprint) {
+    return Promise.resolve({ ok: true, persistedComplete: false, skippedDuplicateFingerprint: true });
+  }
   lastSavedJobFingerprint = fingerprint;
   const dedupKey =
     wrapper && typeof dedupeKeyForCard === 'function' ? dedupeKeyForCard(wrapper) : '';
-  sendRuntimeMessageSafe({ action: 'saveJobOffer', jobOffer, dedupKey }, () => {});
+  const action = confirmComplete ? 'saveJobOfferAndConfirm' : 'saveJobOffer';
+  return new Promise((resolve) => {
+    sendRuntimeMessageSafe({ action, jobOffer, dedupKey }, (res, err) => {
+      if (err) {
+        resolve({ ok: false, error: err.message || String(err), persistedComplete: false });
+        return;
+      }
+      const ok = !!res?.ok;
+      resolve({
+        ok,
+        buffered: !!res?.buffered,
+        persistedComplete: confirmComplete ? !!res?.persistedComplete : ok
+      });
+    });
+  });
 }
 
 /**
@@ -273,63 +290,89 @@ function pnSaveJobOfferToBackground(jobOffer, wrapper) {
  */
 function scheduleJobOfferScrape(wrapper, opts) {
   const origin = opts && opts.o === 'u' ? 'u' : 'a';
+  const waitForSupabaseComplete = !!opts?.waitForSupabaseComplete;
   const card0 = buildJobCardPayload(wrapper);
   const jid0 = String(card0?.linkedinJobId || '');
   const started = Date.now();
   jdScLog({ jid: jid0, st: 'b', o: origin });
 
-  let finished = false;
-  let bestPayload = null;
-  let lastReadySignature = '';
-  let stableReadyCount = 0;
+  return new Promise((resolve) => {
+    let finished = false;
+    let bestPayload = null;
+    let lastReadySignature = '';
+    let stableReadyCount = 0;
 
-  const attempt = () => {
-    if (finished) return;
-    if (wrapper && !wrapper.isConnected) {
+    const done = (result) => {
+      if (finished) return;
       finished = true;
-      jdScLog({ jid: jid0, st: 'x', o: origin, ms: Date.now() - started });
-      return;
-    }
-    const payload = buildJobDetailsPayload(wrapper);
-    if (payload) bestPayload = payload;
+      resolve(result || { state: 'e', persistedComplete: false });
+    };
 
-    const { isReady, signature } = getJobDeskReadyState(payload);
-    if (isReady) {
-      stableReadyCount = signature === lastReadySignature ? stableReadyCount + 1 : 1;
-      lastReadySignature = signature;
-    } else {
-      stableReadyCount = 0;
-      lastReadySignature = '';
-    }
+    const attempt = async () => {
+      if (finished) return;
+      if (wrapper && !wrapper.isConnected) {
+        jdScLog({ jid: jid0, st: 'x', o: origin, ms: Date.now() - started });
+        done({ state: 'x', persistedComplete: false });
+        return;
+      }
+      const payload = buildJobDetailsPayload(wrapper);
+      if (payload) bestPayload = payload;
 
-    if (stableReadyCount >= 2 && payload) {
-      finished = true;
-      pnSaveJobOfferToBackground(payload, wrapper);
-      jdScLog({
-        jid: String(payload.linkedinJobId || jid0),
-        st: 'ok',
-        o: origin,
-        ms: Date.now() - started,
-        dl: String(payload.descriptionText || '').length
-      });
-      return;
-    }
-    if (Date.now() - started >= JOB_SCRAPE_AFTER_OPEN_MAX_MS) {
-      finished = true;
-      if (bestPayload) pnSaveJobOfferToBackground(bestPayload, wrapper);
-      jdScLog({
-        jid: String((bestPayload && bestPayload.linkedinJobId) || jid0),
-        st: bestPayload ? 't' : 'e',
-        o: origin,
-        ms: Date.now() - started,
-        dl: bestPayload ? String(bestPayload.descriptionText || '').length : 0
-      });
-      return;
-    }
-    window.setTimeout(attempt, JOB_SCRAPE_AFTER_OPEN_STEP_MS);
-  };
+      const { isReady, signature } = getJobDeskReadyState(payload);
+      if (isReady) {
+        stableReadyCount = signature === lastReadySignature ? stableReadyCount + 1 : 1;
+        lastReadySignature = signature;
+      } else {
+        stableReadyCount = 0;
+        lastReadySignature = '';
+      }
 
-  window.setTimeout(attempt, JOB_SCRAPE_AFTER_OPEN_FIRST_DELAY_MS);
+      if (stableReadyCount >= 2 && payload) {
+        const saveRes = await pnSaveJobOfferToBackground(payload, wrapper, {
+          confirmComplete: waitForSupabaseComplete
+        });
+        const persistedComplete = !!saveRes?.persistedComplete;
+        jdScLog({
+          jid: String(payload.linkedinJobId || jid0),
+          st: 'ok',
+          o: origin,
+          ms: Date.now() - started,
+          dl: String(payload.descriptionText || '').length,
+          pc: persistedComplete ? 1 : 0
+        });
+        done({ state: 'ok', persistedComplete, saveOk: !!saveRes?.ok });
+        return;
+      }
+      if (Date.now() - started >= JOB_SCRAPE_AFTER_OPEN_MAX_MS) {
+        let persistedComplete = false;
+        let saveOk = false;
+        if (bestPayload) {
+          const saveRes = await pnSaveJobOfferToBackground(bestPayload, wrapper, {
+            confirmComplete: waitForSupabaseComplete
+          });
+          persistedComplete = !!saveRes?.persistedComplete;
+          saveOk = !!saveRes?.ok;
+        }
+        jdScLog({
+          jid: String((bestPayload && bestPayload.linkedinJobId) || jid0),
+          st: bestPayload ? 't' : 'e',
+          o: origin,
+          ms: Date.now() - started,
+          dl: bestPayload ? String(bestPayload.descriptionText || '').length : 0,
+          pc: persistedComplete ? 1 : 0
+        });
+        done({ state: bestPayload ? 't' : 'e', persistedComplete, saveOk });
+        return;
+      }
+      window.setTimeout(() => {
+        void attempt();
+      }, JOB_SCRAPE_AFTER_OPEN_STEP_MS);
+    };
+
+    window.setTimeout(() => {
+      void attempt();
+    }, JOB_SCRAPE_AFTER_OPEN_FIRST_DELAY_MS);
+  });
 }
 
 function saveJobCardSnapshot(wrapper) {
@@ -337,7 +380,7 @@ function saveJobCardSnapshot(wrapper) {
   const payload = buildJobCardPayload(wrapper);
   if (!payload) return;
   wrapper.setAttribute(DATA_JOB_CARD_SAVED, 'true');
-  pnSaveJobOfferToBackground(payload);
+  void pnSaveJobOfferToBackground(payload);
 }
 
 function getJobCardWrapperFromEventTarget(target) {

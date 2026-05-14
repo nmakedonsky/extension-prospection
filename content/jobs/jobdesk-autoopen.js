@@ -249,6 +249,10 @@ function mergeSeenClientJobsFromDom() {
   if (jdMergeLastLk && jdMergeLastLk !== lk) {
     flushAccumulatedClientJobIdsForListKey(jdMergeLastLk, 'list-url-changed');
     jdClearListGatingState(jdMergeLastLk);
+    // New list entry point: drop any stale cache for the destination lk.
+    JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(lk);
+    JD_OPENED_CLIENT_IDS_BY_LIST_KEY.delete(lk);
+    jdClearListGatingState(lk);
     listKeyChanged = true;
   }
   if (!JD_SEEN_CLIENT_IDS_BY_LIST_KEY.has(lk)) {
@@ -663,6 +667,7 @@ function requestAutoOpenRun(reason = '') {
   const now = Date.now();
   if (now < autoOpenDisabledUntil) return;
   lastJdRunReason = String(reason || '').slice(0, 80);
+  const immediateAfterFullScroll = lastJdRunReason.includes('full-scroll-ready');
   if (!pnTabVisibleForAutoOpen()) {
     deferredAutoOpenWhileTabHidden = true;
     return;
@@ -675,13 +680,37 @@ function requestAutoOpenRun(reason = '') {
     jdLogAwaitFullScroll(lastJdRunReason);
     return;
   }
-  if (autoOpenCoalesceTimer) return;
-  const delay = Math.max(0, AUTO_OPEN_MIN_GAP_MS - (now - lastAutoOpenRunAt));
+  if (autoOpenCoalesceTimer) {
+    if (!immediateAfterFullScroll) return;
+    clearTimeout(autoOpenCoalesceTimer);
+    autoOpenCoalesceTimer = null;
+  }
+  const delay = immediateAfterFullScroll
+    ? 0
+    : Math.max(0, AUTO_OPEN_MIN_GAP_MS - (now - lastAutoOpenRunAt));
   autoOpenCoalesceTimer = setTimeout(() => {
     autoOpenCoalesceTimer = null;
     lastAutoOpenRunAt = Date.now();
     void tryAutoOpenNewVisibleClientJobs();
   }, delay);
+}
+
+function runAutoOpenImmediatelyAfterFullScroll(reason = '') {
+  lastJdRunReason = String(reason || 'full-scroll-ready').slice(0, 80);
+  if (!pnTabVisibleForAutoOpen()) {
+    deferredAutoOpenWhileTabHidden = true;
+    return;
+  }
+  if (openClientJobsSequenceRunning) {
+    autoOpenRunQueued = true;
+    return;
+  }
+  if (autoOpenCoalesceTimer) {
+    clearTimeout(autoOpenCoalesceTimer);
+    autoOpenCoalesceTimer = null;
+  }
+  lastAutoOpenRunAt = Date.now();
+  void tryAutoOpenNewVisibleClientJobs();
 }
 
 function scheduleAutoOpenAfterClientClassified() {
@@ -723,13 +752,18 @@ async function tryAutoOpenNewVisibleClientJobs() {
         const opened = syncUrlCurrentJobId(jid);
         if (opened) {
           jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
-          scheduleJobOfferScrape(null, { o: 'a' });
           batchOpened += 1;
-          jdLog('jd_click', { jid, i, m: pendingById.ids.length, r: `${lastJdRunReason}|id-pass` });
+          scheduleJobOfferScrape(null, { o: 'a' });
+          jdLog('jd_click', {
+            jid,
+            i,
+            m: pendingById.ids.length,
+            r: `${lastJdRunReason}|id-pass`
+          });
         } else {
           jdLog('jd_fail', { jid, m: 'open-by-id', i, r: lastJdRunReason });
         }
-        if (i < pendingById.ids.length - 1) {
+        if (opened && i < pendingById.ids.length - 1) {
           const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsBetweenClientClicks());
           if (!stillHere) {
             deferredAutoOpenWhileTabHidden = true;
@@ -760,6 +794,12 @@ async function tryAutoOpenNewVisibleClientJobs() {
     const k = dedupeKeyForCard(w);
     if (!k) return false;
     if (autoOpenedClientJobKeys.has(k)) return false;
+    const jid = resolveJobIdForOpen(w) || '';
+    if (jid) {
+      const lk = jdListPageKey();
+      const openedById = jdGetOpenedIdsSetForListKey(lk);
+      if (openedById.has(jid)) return false;
+    }
     return true;
   });
 
@@ -816,13 +856,15 @@ async function tryAutoOpenNewVisibleClientJobs() {
       const k = dedupeKeyForCard(wrapper);
       if (!k || autoOpenedClientJobKeys.has(k)) continue;
       const jid = resolveJobIdForOpen(wrapper) || '';
+      const lk = jdListPageKey();
       const opened = performAutoOpenClientJobActions(wrapper);
       if (opened) {
         saveJobCardSnapshot(wrapper);
-        scheduleJobOfferScrape(wrapper, { o: 'a' });
         autoOpenedClientJobKeys.add(k);
-        dequeueClientJobOpenKey(k);
+        if (jid) jdGetOpenedIdsSetForListKey(lk).add(jid);
         batchOpened += 1;
+        dequeueClientJobOpenKey(k);
+        scheduleJobOfferScrape(wrapper, { o: 'a' });
         jdLog('jd_click', {
           jid: String(jid),
           lk: jdListPageKey() || undefined,
@@ -833,7 +875,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
       } else {
         jdLog('jd_fail', { jid: String(jid), k: String(k).slice(0, 80), m: 'open', i, r: lastJdRunReason });
       }
-      if (i < pendingToOpen.length - 1) {
+      if (opened && i < pendingToOpen.length - 1) {
         const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsBetweenClientClicks());
         if (!stillHere) {
           deferredAutoOpenWhileTabHidden = true;
@@ -864,7 +906,7 @@ const debouncedAutoOpenClientJobs = debounce(() => {
   mergeSeenClientJobsFromDom();
   jdTrackCurrentListScrollProgress();
   if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('scroll-debounce')) {
-    requestAutoOpenRun('full-scroll-ready');
+    runAutoOpenImmediatelyAfterFullScroll('full-scroll-ready|scroll-debounce');
   }
   const now = Date.now();
   if (now - __jdLastScrollLogAt >= JD_SCROLL_LOG_MS) {
@@ -879,7 +921,7 @@ const debouncedAutoOpenOnMutation = debounce(() => {
   mergeSeenClientJobsFromDom();
   jdTrackCurrentListScrollProgress();
   if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('dom-mutation')) {
-    requestAutoOpenRun('full-scroll-ready');
+    runAutoOpenImmediatelyAfterFullScroll('full-scroll-ready|dom-mutation');
   }
   requestAutoOpenRun('dom-mutation');
 }, 850);
@@ -924,7 +966,7 @@ function attachAutoOpenScrollListeners() {
       mergeSeenClientJobsFromDom();
       jdTrackCurrentListScrollProgress();
       if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('scrollend')) {
-        requestAutoOpenRun('full-scroll-ready');
+        runAutoOpenImmediatelyAfterFullScroll('full-scroll-ready|scrollend');
       }
       requestAutoOpenRun('scrollend');
     },
