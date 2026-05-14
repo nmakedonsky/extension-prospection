@@ -6,6 +6,7 @@
 const JOB_SCRAPE_AFTER_OPEN_FIRST_DELAY_MS = 520;
 const JOB_SCRAPE_AFTER_OPEN_STEP_MS = 380;
 const JOB_SCRAPE_AFTER_OPEN_MAX_MS = 18000;
+const JOB_SCRAPE_MIN_DESCRIPTION_LEN = 100;
 
 const JOB_DETAIL_PANEL_SELECTORS = [
   '.jobs-search__job-details--container',
@@ -221,7 +222,12 @@ function isElementVisible(el) {
   }
 }
 
-function getJobDeskReadyState(payload) {
+/**
+ * @param {object|null} payload - résultat de buildJobDetailsPayload
+ * @param {string} [expectedJid] - jid cible passé par l'auto-open ; si fourni et si le panel
+ *   expose un jid différent, isReady = false jusqu'à correspondance.
+ */
+function getJobDeskReadyState(payload, expectedJid) {
   const detailsPanel = getJobDetailsPanel();
   const metadataCount = Array.isArray(payload?.linkedinData?.details?.metadataItems)
     ? payload.linkedinData.details.metadataItems.length
@@ -229,14 +235,22 @@ function getJobDeskReadyState(payload) {
   const descriptionLength = String(payload?.descriptionText || '').trim().length;
   const hasTitle = String(payload?.jobTitle || '').trim().length > 0;
   const hasCompany = String(payload?.companyName || '').trim().length > 0;
+
+  // Vérification du jid panel vs jid attendu : diagnostic uniquement, ne bloque pas isReady.
+  // En auto-open fire-and-forget, le panel prend > 520 ms pour afficher le nouveau job,
+  // donc bloquer sur ce check force systématiquement le timeout de 18 s.
+  const panelJid = String(payload?.linkedinJobId || '').trim();
+  const jidMatches = !expectedJid || !panelJid || panelJid === String(expectedJid).trim();
+
   return {
     isReady:
       !!payload &&
       isElementVisible(detailsPanel) &&
       hasCompany &&
       hasTitle &&
-      descriptionLength > 0 &&
-      metadataCount >= 1,
+      descriptionLength >= JOB_SCRAPE_MIN_DESCRIPTION_LEN,
+    jidMatches,
+    descriptionLength,
     signature: JSON.stringify([
       payload?.linkedinJobId || '',
       payload?.jobUrl || '',
@@ -286,21 +300,27 @@ function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
 /**
  * Enchaîne après ouverture du panneau détail : `buildJobDetailsPayload` lit le DOM Jobdesk.
  * @param {HTMLElement|null} wrapper
- * @param {{ o?: 'a' | 'u' }} [opts] o=a auto-open, o=u clic utilisateur
+ * @param {{ o?: 'a'|'u', jid?: string }} [opts]
+ *   o=a auto-open, o=u clic utilisateur
+ *   jid=ID LinkedIn attendu — si fourni, attend que le panel affiche ce job avant de scraper
  */
 function scheduleJobOfferScrape(wrapper, opts) {
-  const origin = opts && opts.o === 'u' ? 'u' : 'a';
+  const origin = opts?.o === 'u' ? 'u' : 'a';
   const waitForSupabaseComplete = !!opts?.waitForSupabaseComplete;
+  const expectedJid = String(opts?.jid || '').trim();
   const card0 = buildJobCardPayload(wrapper);
-  const jid0 = String(card0?.linkedinJobId || '');
+  const jid0 = expectedJid || String(card0?.linkedinJobId || '');
   const started = Date.now();
-  jdScLog({ jid: jid0, st: 'b', o: origin });
+  jdScLog({ jid: jid0, st: 'b', o: origin, xjid: expectedJid || undefined });
 
   return new Promise((resolve) => {
     let finished = false;
     let bestPayload = null;
     let lastReadySignature = '';
     let stableReadyCount = 0;
+    // flags one-shot pour éviter de spammer les logs de diagnostic
+    let warnedJidMismatch = false;
+    let warnedShortDesc = false;
 
     const done = (result) => {
       if (finished) return;
@@ -318,7 +338,25 @@ function scheduleJobOfferScrape(wrapper, opts) {
       const payload = buildJobDetailsPayload(wrapper);
       if (payload) bestPayload = payload;
 
-      const { isReady, signature } = getJobDeskReadyState(payload);
+      const { isReady, jidMatches, descriptionLength, signature } = getJobDeskReadyState(payload, expectedJid);
+
+      // Log one-shot si on attend que le bon job soit affiché
+      if (!jidMatches && !warnedJidMismatch) {
+        warnedJidMismatch = true;
+        jdScLog({
+          jid: jid0,
+          st: 'w_jid',
+          o: origin,
+          ms: Date.now() - started,
+          pjid: String(payload?.linkedinJobId || '')
+        });
+      }
+      // Log one-shot si description présente mais trop courte
+      if (!isReady && payload && descriptionLength > 0 && descriptionLength < JOB_SCRAPE_MIN_DESCRIPTION_LEN && !warnedShortDesc) {
+        warnedShortDesc = true;
+        jdScLog({ jid: jid0, st: 'w_desc', o: origin, ms: Date.now() - started, dl: descriptionLength });
+      }
+
       if (isReady) {
         stableReadyCount = signature === lastReadySignature ? stableReadyCount + 1 : 1;
         lastReadySignature = signature;
@@ -327,7 +365,7 @@ function scheduleJobOfferScrape(wrapper, opts) {
         lastReadySignature = '';
       }
 
-      if (stableReadyCount >= 2 && payload) {
+      if (stableReadyCount >= 1 && payload) {
         const saveRes = await pnSaveJobOfferToBackground(payload, wrapper, {
           confirmComplete: waitForSupabaseComplete
         });

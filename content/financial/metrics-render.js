@@ -25,13 +25,19 @@ function pnFinancialScalar(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function formatRevenueRaw(n) {
+function pnFinancialMoneySuffix(currency) {
+  return currency === 'USD' ? '$' : '€';
+}
+
+/** Montants agrégés (CA, cape, etc.) : unités pleines en entrée → échelle lisible + symbole devise. */
+function formatMoneyScaleAbsolute(n, currency) {
+  const sym = pnFinancialMoneySuffix(currency);
   const v = pnFinancialScalar(n);
   if (v == null) return null;
-  if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(2)} Md`;
-  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(2)} M`;
-  if (Math.abs(v) >= 1e3) return `${Math.round(v / 1e3)} k`;
-  return `${Math.round(v)}`;
+  if (Math.abs(v) >= 1e9) return `${(v / 1e9).toFixed(2)} Md${sym}`;
+  if (Math.abs(v) >= 1e6) return `${(v / 1e6).toFixed(2)} M${sym}`;
+  if (Math.abs(v) >= 1e3) return `${Math.round(v / 1e3)} k${sym}`;
+  return `${Math.round(v)}${sym}`;
 }
 
 function appendMetricRow(list, labelText, valueText, valueClass) {
@@ -66,6 +72,8 @@ function renderFinancialMetrics(list, response) {
   const u = response?.unified || {};
   const f = u.financials || {};
   const s = u.signals || {};
+  const reportingCurrency = f.reporting_currency === 'USD' ? 'USD' : 'EUR';
+  const moneySym = pnFinancialMoneySuffix(reportingCurrency);
 
   const pct = (x) => (x == null || x === '' ? '—' : `${Math.round(Number(x) * 10) / 10} %`);
   const num = (x) => (x == null || x === '' ? '—' : `${Math.round(Number(x))}`);
@@ -74,7 +82,7 @@ function renderFinancialMetrics(list, response) {
 
   const revenue = f.revenue ?? s.revenue_public ?? null;
   const revScalar = pnFinancialScalar(revenue);
-  const revStr = revScalar != null ? formatRevenueRaw(revenue) : '—';
+  const revStr = revScalar != null ? formatMoneyScaleAbsolute(revenue, reportingCurrency) : '—';
   const marketCap = f.market_cap;
   const capScalar = pnFinancialScalar(marketCap);
 
@@ -85,7 +93,7 @@ function renderFinancialMetrics(list, response) {
   appendMetricRow(
     list,
     'Mkt cap',
-    capScalar != null ? formatRevenueRaw(marketCap) : '—',
+    capScalar != null ? formatMoneyScaleAbsolute(marketCap, reportingCurrency) : '—',
     capScalar != null ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a'
   );
   appendMetricRow(
@@ -170,19 +178,19 @@ function renderFinancialMetrics(list, response) {
   appendMetricRow(
     list,
     'CA / sal.',
-    rpe == null ? '—' : `${Math.round(Number(rpe) * 10) / 10} k€`,
+    rpe == null ? '—' : `${Math.round(Number(rpe) * 10) / 10} k${moneySym}`,
     rpe == null ? 'lph-financial-card__value--n/a' : Number(rpe) >= 120 ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--warn'
   );
   appendMetricRow(
     list,
     'RN / sal.',
-    f.net_income_per_employee == null ? '—' : `${Math.round(Number(f.net_income_per_employee) * 10) / 10} k`,
+    f.net_income_per_employee == null ? '—' : `${Math.round(Number(f.net_income_per_employee) * 10) / 10} k${moneySym}`,
     f.net_income_per_employee == null ? 'lph-financial-card__value--n/a' : 'lph-financial-card__value--ok'
   );
   appendMetricRow(
     list,
     'FCF / sal.',
-    f.fcf_per_employee == null ? '—' : `${Math.round(Number(f.fcf_per_employee) * 10) / 10} k`,
+    f.fcf_per_employee == null ? '—' : `${Math.round(Number(f.fcf_per_employee) * 10) / 10} k${moneySym}`,
     f.fcf_per_employee == null ? 'lph-financial-card__value--n/a' : 'lph-financial-card__value--ok'
   );
   appendMetricRow(

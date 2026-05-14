@@ -5,30 +5,39 @@
     return maybe;
   }
 
-  /**
-   * Prompt Gemini : montants en millions (M€ / M$) sauf valeur absolue ≥ 1e9 (unités pleines).
-   * Le dock et formatRevenueRaw attendent des euros (ou équivalent) absolus.
-   */
-  function llmMoneyToCanonicalEuros(v) {
-    if (v == null || !Number.isFinite(Number(v))) return null;
-    const x = Number(v);
-    if (Math.abs(x) >= 1e9) return x;
-    return x * 1e6;
+  /** Plafond raisonnable (unités pleines) pour CA, cape, trésorerie agrégée — au-delà, on considère une erreur d'échelle. */
+  const LLM_MONEY_MAX_ABS = 12e12;
+  const LLM_MONEY_FROM_MILLIONS = 1e6;
+
+  function withinMoneyCap(absVal) {
+    return Number.isFinite(absVal) && Math.abs(absVal) <= LLM_MONEY_MAX_ABS;
   }
 
   /**
-   * Calcule CA/salarié en k€ en acceptant les 2 conventions:
-   * - montant absolu (ex. 20_000_000 €)
-   * - montant en millions (ex. 20 pour 20 M€)
+   * Contrat harmonisé (prompt Gemini) : `value` est **toujours en millions** de la devise de reporting
+   * (ex. CA ~96,5 Md → 96500 ; ~130 Md$ → 130000). Le dock attend des unités pleines.
+   * Repli si échelle incohérente : millions gonflés ×1000 ; ou valeurs déjà en unités pleines ≥ 1e9 (legacy / erreur prompt).
+   */
+  function llmMoneyMillionsToAbsolute(v) {
+    if (v == null || !Number.isFinite(Number(v))) return null;
+    const x = Number(v);
+    if (x === 0) return 0;
+    const primary = x * LLM_MONEY_FROM_MILLIONS;
+    if (withinMoneyCap(primary)) return primary;
+    const altThousands = (x / 1000) * LLM_MONEY_FROM_MILLIONS;
+    if (withinMoneyCap(altThousands)) return altThousands;
+    if (Math.abs(x) >= 1e9 && withinMoneyCap(x)) return x;
+    return null;
+  }
+
+  /**
+   * Calcule CA/salarié en milliers (k€ / k$) : revenue attendu en unités pleines, employees en têtes.
    */
   function inferRevenuePerEmployeeK(revenue, employees) {
     const R = Number(revenue);
     const E = Number(employees);
     if (!Number.isFinite(R) || !Number.isFinite(E) || E <= 0) return null;
-    if (Math.abs(R) >= 1e6) {
-      return (R / E) / 1000;
-    }
-    return (R * 1000) / E;
+    return (R / E) / 1000;
   }
 
   /** LLM ou calcul parfois en €/tête au lieu de k€/tête */
@@ -39,8 +48,23 @@
     return x;
   }
 
+  function normalizeReportingCurrency(llm) {
+    const raw =
+      (typeof llm?.reporting_currency === 'string' && llm.reporting_currency) ||
+      (typeof llm?.reportingCurrency === 'string' && llm.reportingCurrency) ||
+      '';
+    const s = String(raw)
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, '');
+    if (s === 'USD' || s === 'US$' || s === 'DOLLARS' || s === 'DOLLAR') return 'USD';
+    if (s === 'EUR' || s === '€' || s === 'EUROS' || s === 'EURO') return 'EUR';
+    return null;
+  }
+
   function normalizeLlmFinancials(llm) {
-    const revenue = llmMoneyToCanonicalEuros(getValue(llm?.revenue));
+    const reporting_currency = normalizeReportingCurrency(llm);
+    const revenue = llmMoneyMillionsToAbsolute(getValue(llm?.revenue));
     const employees = getValue(llm?.employees);
     const revenuePerEmployeeRaw =
       getValue(llm?.revenuePerEmployee) ??
@@ -49,10 +73,11 @@
         : null);
     const revenuePerEmployee = coercePerEmployeeK(revenuePerEmployeeRaw);
     return {
+      reporting_currency,
       revenue: revenue ?? null,
       revenue_per_employee: revenuePerEmployee,
       employees: Number.isFinite(Number(employees)) ? Number(employees) : null,
-      ebitda: llmMoneyToCanonicalEuros(getValue(llm?.ebitda)),
+      ebitda: llmMoneyMillionsToAbsolute(getValue(llm?.ebitda)),
       ebitda_margin: getValue(llm?.ebitda_margin),
       net_margin: getValue(llm?.net_margin),
       gross_margin: getValue(llm?.gross_margin),
@@ -61,14 +86,14 @@
       capex_to_revenue_pct: getValue(llm?.capex_to_revenue_pct),
       rnd_to_revenue_pct: getValue(llm?.rnd_to_revenue_pct),
       revenue_growth_3y_cagr: getValue(llm?.revenue_growth_3y_cagr),
-      operating_cash_flow: llmMoneyToCanonicalEuros(getValue(llm?.operating_cash_flow)),
+      operating_cash_flow: llmMoneyMillionsToAbsolute(getValue(llm?.operating_cash_flow)),
       operating_cashflow_positive: getValue(llm?.operating_cashflow_positive),
       revenue_growth: getValue(llm?.revenue_growth),
-      revenue_previous: llmMoneyToCanonicalEuros(getValue(llm?.revenue_previous)),
+      revenue_previous: llmMoneyMillionsToAbsolute(getValue(llm?.revenue_previous)),
       net_income_per_employee: coercePerEmployeeK(getValue(llm?.net_income_per_employee)),
       fcf_per_employee: coercePerEmployeeK(getValue(llm?.fcf_per_employee)),
-      free_cash_flow: llmMoneyToCanonicalEuros(getValue(llm?.free_cash_flow)),
-      market_cap: llmMoneyToCanonicalEuros(getValue(llm?.market_cap))
+      free_cash_flow: llmMoneyMillionsToAbsolute(getValue(llm?.free_cash_flow)),
+      market_cap: llmMoneyMillionsToAbsolute(getValue(llm?.market_cap))
     };
   }
 

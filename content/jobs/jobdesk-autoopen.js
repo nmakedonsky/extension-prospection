@@ -249,9 +249,8 @@ function mergeSeenClientJobsFromDom() {
   if (jdMergeLastLk && jdMergeLastLk !== lk) {
     flushAccumulatedClientJobIdsForListKey(jdMergeLastLk, 'list-url-changed');
     jdClearListGatingState(jdMergeLastLk);
-    // New list entry point: drop any stale cache for the destination lk.
-    JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(lk);
-    JD_OPENED_CLIENT_IDS_BY_LIST_KEY.delete(lk);
+    // Réinitialise uniquement le gate de scroll sur la destination (force un re-scroll)
+    // mais conserve les sets seen/opened pour éviter de re-cliquer des jobs déjà traités.
     jdClearListGatingState(lk);
     listKeyChanged = true;
   }
@@ -737,9 +736,18 @@ async function tryAutoOpenNewVisibleClientJobs() {
     return;
   }
 
-  const pendingById = await getPendingClientJobIdsForCurrentList();
+  // Verrouillage AVANT l'await pour éviter une double entrée concurrente
+  // (DOM mutation ou popstate peuvent re-déclencher pendant le fetch Supabase).
+  openClientJobsSequenceRunning = true;
+  let pendingById;
+  try {
+    pendingById = await getPendingClientJobIdsForCurrentList();
+  } catch (_) {
+    openClientJobsSequenceRunning = false;
+    return;
+  }
+
   if (pendingById.ids.length > 0) {
-    openClientJobsSequenceRunning = true;
     let batchOpened = 0;
     try {
       for (let i = 0; i < pendingById.ids.length; i++) {
@@ -753,7 +761,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
         if (opened) {
           jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
           batchOpened += 1;
-          scheduleJobOfferScrape(null, { o: 'a' });
+          scheduleJobOfferScrape(null, { o: 'a', jid });
           jdLog('jd_click', {
             jid,
             i,
@@ -805,6 +813,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
 
   if (pending.length === 0) {
     jdLog('jd_skip', { y: 'no_pending', r: lastJdRunReason });
+    openClientJobsSequenceRunning = false;
     return;
   }
 
@@ -839,10 +848,11 @@ async function tryAutoOpenNewVisibleClientJobs() {
 
   if (pendingToOpen.length === 0) {
     jdLog('jd_skip', { y: 'all_sb', r: lastJdRunReason, n: pending.length });
+    openClientJobsSequenceRunning = false;
     return;
   }
 
-  openClientJobsSequenceRunning = true;
+  // openClientJobsSequenceRunning déjà = true (posé avant le premier await)
   let batchOpened = 0;
   try {
     for (let i = 0; i < pendingToOpen.length; i++) {
@@ -864,7 +874,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
         if (jid) jdGetOpenedIdsSetForListKey(lk).add(jid);
         batchOpened += 1;
         dequeueClientJobOpenKey(k);
-        scheduleJobOfferScrape(wrapper, { o: 'a' });
+        scheduleJobOfferScrape(wrapper, { o: 'a', jid: jid || undefined });
         jdLog('jd_click', {
           jid: String(jid),
           lk: jdListPageKey() || undefined,

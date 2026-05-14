@@ -64,10 +64,10 @@ Référence nom pour les champs : "${String(companyName || '').replace(/"/g, '\\
 
 Étapes :
 1) Déduis quelle entreprise du monde réel correspond le mieux au contexte (homonymes, filiales : précise dans identification_notes).
-2) Remplis les montants en millions de la devise principale (EUR pour une société européenne dominante, USD si société US dominante) ; indique la devise implicite dans identification_notes si utile.
-3) revenue, revenue_previous, market_cap, ebitda, operating_cash_flow, free_cash_flow : en millions (M€ / M$), sauf si tu dois utiliser le montant absolu en unités pleines (≥ 1e9 dans ce cas). employees = effectif (ETP) récent, en nombre de têtes (pas en millions).
-4) revenuePerEmployee = uniquement le CA par employé en milliers (k€ ou k$ par tête), typiquement entre ~50 et ~800 pour les grands groupes — jamais en euros bruts par tête (pas 600000) ; sinon null.
-5) net_income_per_employee et fcf_per_employee : en milliers par tête (k), pas en euros bruts ; sinon null.
+2) reporting_currency : **EUR** ou **USD** — la même devise pour tous les montants monétaires ci-dessous (société européenne dominante → EUR ; société US dominante cotée en USD → USD).
+3) **Convention unique (obligatoire)** : revenue, revenue_previous, market_cap, ebitda, operating_cash_flow, free_cash_flow = nombre exprimé **toujours en millions** de reporting_currency (pas d'unités pleines, pas de milliards « bruts » sans conversion). Exemples : CA annuel ~96,5 milliards → value **96500** ; ~130 milliards de dollars → **130000** ; PME ~120 millions → **120**. employees = effectif (ETP) récent, **nombre de têtes entier** (pas en millions).
+4) revenuePerEmployee = CA par employé **uniquement en milliers** de la même devise (k€ ou k$ par tête), typiquement ~50 à ~800 pour les grands groupes — jamais en unités pleines par tête (pas 600000) ; sinon null.
+5) net_income_per_employee et fcf_per_employee : **milliers par tête** (même devise que le CA), pas en unités pleines ; sinon null.
 6) Marges et taux de croissance en pourcentage (ex. 12 pour 12 %, 9.3 pour 9.3 %). Ratios (ex. net_debt_ebitda) en multiplicateur simple (ex. 1.5).
 7) Si tu ne peux pas estimer raisonnablement une métrique, mets null et une confidence basse sur ce champ.
 8) globalConfidence : ta confiance globale 0–100 sur l'ensemble de l'extraction.
@@ -76,6 +76,7 @@ Retourne UNIQUEMENT un JSON valide :
 {
   "identified_company_name": "string",
   "identification_notes": "string|null",
+  "reporting_currency": "EUR"|"USD",
   "revenue": {"value": number|null, "confidence": number, "url": "string|null"},
   "revenue_previous": {"value": number|null, "confidence": number, "url": "string|null"},
   "employees": {"value": number|null, "confidence": number, "url": "string|null"},
