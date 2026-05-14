@@ -4,7 +4,6 @@
  * et sanitizeForPostgres (sw-supabase-financial.js).
  */
 const SW_SUPABASE_JOBS_TABLE = 'saved_jobs';
-const FORCE_RESCRAPE_CUTOFF_ISO = new Date(new Date().setHours(0, 0, 0, 0)).toISOString();
 
 function swMergeLinkedinData(existingData, incomingData) {
   return sanitizeForPostgres({
@@ -179,8 +178,6 @@ function swNormalizeJobUrlForSupabaseMatch(u) {
 function swSavedJobRowHasCompleteJobDesk(row) {
   if (!row) return false;
   if (row.needs_rescrape === true) return false;
-  const rowUpdatedAt = String(row.updated_at || row.details_scraped_at || row.created_at || '').trim();
-  if (!rowUpdatedAt || rowUpdatedAt < FORCE_RESCRAPE_CUTOFF_ISO) return false;
   const hasDetailsAt = row.details_scraped_at != null && String(row.details_scraped_at).trim() !== '';
   const hasDescription = row.description_text != null && String(row.description_text).trim().length > 0;
   return hasDetailsAt && hasDescription;
