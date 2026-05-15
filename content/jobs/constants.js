@@ -5,6 +5,7 @@
 
 const DATA_PROCESSED = 'data-pn-processed';
 const DATA_LOADING = 'data-pn-loading';
+const DATA_LOADING_AT = 'data-pn-loading-at';
 const DATA_FAILED = 'data-pn-failed';
 const DATA_TYPE = 'data-pn-type';
 /** Carte : snapshot carte déjà envoyé (évite doublons saveJobOffer stage=card). */

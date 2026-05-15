@@ -1,4 +1,8 @@
-/** Badges SS2I / Client + appel background CLASSIFY_COMPANY. */
+/** Badges SS2I / Client — classification après scroll complet de la liste, requêtes Supabase groupées. */
+
+const PN_CLASSIFY_CHUNK_SIZE = 10;
+const PN_CLASSIFY_CHUNK_TIMEOUT_MS = 55000;
+const PN_LOADING_STUCK_MS = 45000;
 
 function createBadge(kind) {
   const span = document.createElement('span');
@@ -14,126 +18,226 @@ function createBadge(kind) {
   return span;
 }
 
-function sendClassify(companyName) {
+/** Hôte du badge : nom société, sinon ligne titre, sinon la carte. */
+function getBadgeHostElement(card) {
+  const cel = findCompanyElementInCard(card);
+  if (cel && !isNodeInJobDetailsComposed(card)) return cel;
+  const title = card.querySelector?.(
+    '[class*="job-card-list__title"], [class*="base-search-card__title"], [class*="job-card-container__link"], h3, h2'
+  );
+  if (title && !isNodeInJobDetailsComposed(title)) return title;
+  return card;
+}
+
+/** Aligné sur le gate auto-open (jobdesk-autoopen.js). */
+function pnListAllowsClassificationNow() {
+  if (typeof jdIsCurrentListFullyScrolled !== 'function') return true;
+  return jdIsCurrentListFullyScrolled();
+}
+
+function sendClassifyBatchChunk(companyNames) {
   return new Promise((resolve) => {
+    const list = Array.isArray(companyNames) ? companyNames : [];
+    if (!list.length) {
+      resolve({});
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value && typeof value === 'object' ? value : {});
+    };
+    const timer = setTimeout(() => finish({}), PN_CLASSIFY_CHUNK_TIMEOUT_MS);
     try {
-      chrome.runtime.sendMessage({ type: 'CLASSIFY_COMPANY', companyName }, (res) => {
+      chrome.runtime.sendMessage({ type: 'CLASSIFY_COMPANIES_BATCH', companyNames: list }, (res) => {
         if (chrome.runtime.lastError) {
-          resolve(null);
+          finish({});
           return;
         }
-        resolve(res === 'Client' || res === 'SS2I' ? res : null);
+        finish(res);
       });
     } catch (_) {
-      resolve(null);
+      finish({});
     }
   });
+}
+
+async function sendClassifyBatch(companyNames) {
+  const list = [
+    ...new Set(
+      (companyNames || [])
+        .map((n) => String(n || '').trim())
+        .filter((n) => n.length >= 2)
+    )
+  ];
+  if (!list.length) return {};
+  const out = {};
+  for (let i = 0; i < list.length; i += PN_CLASSIFY_CHUNK_SIZE) {
+    const chunk = list.slice(i, i + PN_CLASSIFY_CHUNK_SIZE);
+    const part = await sendClassifyBatchChunk(chunk);
+    Object.assign(out, part);
+  }
+  return out;
 }
 
 function ensureBadgeOnProcessedCard(card) {
   if (!card?.hasAttribute?.(DATA_PROCESSED)) return;
   const type = card.getAttribute(DATA_TYPE);
   if (type !== 'Client' && type !== 'SS2I') return;
-  const cel = findCompanyElementInCard(card);
-  if (!cel || isNodeInJobDetailsComposed(card)) return;
-  const hasBadge = !!cel.querySelector('.pn-badge');
+  if (isNodeInJobDetailsComposed(card)) return;
+  const host = getBadgeHostElement(card);
+  if (!host) return;
+  const hasBadge = !!host.querySelector('.pn-badge');
   if (hasBadge) return;
-  cel.appendChild(createBadge(type));
+  host.appendChild(createBadge(type));
 }
 
-async function processCard(card) {
-  if (!isClassificationTargetPage()) return;
-  const cel = findCompanyElementInCard(card);
-  const companyName = extractCompanyName(cel);
-  if (!companyName || companyName.length < 2) return;
-  if (card.hasAttribute(DATA_PROCESSED)) return;
-  if (card.hasAttribute(DATA_LOADING)) return;
-  const failedAt = Number(card.getAttribute(DATA_FAILED) || '0');
-  if (failedAt && Date.now() - failedAt < 15000) return;
+function clearCardLoadingState(card) {
+  if (!card) return;
+  card.removeAttribute(DATA_LOADING);
+  card.removeAttribute(DATA_LOADING_AT);
+  const host = getBadgeHostElement(card);
+  if (!host) return;
+  host.querySelectorAll('.pn-badge').forEach((b) => b.remove());
+}
 
-  const hostEl = cel;
+function setCardLoadingBadge(card) {
+  const hostEl = getBadgeHostElement(card);
+  if (!hostEl || isNodeInJobDetailsComposed(card)) return;
+  card.setAttribute(DATA_LOADING, 'true');
+  card.setAttribute(DATA_LOADING_AT, String(Date.now()));
+  hostEl.querySelectorAll('.pn-badge').forEach((b) => b.remove());
+  hostEl.appendChild(createBadge('loading'));
+}
+
+function applyClassificationToCard(card, type) {
+  const hostEl = getBadgeHostElement(card);
   if (!hostEl || isNodeInJobDetailsComposed(card)) return;
 
-  card.setAttribute(DATA_LOADING, 'true');
   hostEl.querySelectorAll('.pn-badge').forEach((b) => b.remove());
-  const placeholder = createBadge('loading');
-  hostEl.appendChild(placeholder);
+  card.removeAttribute(DATA_LOADING);
+  card.removeAttribute(DATA_LOADING_AT);
 
-  try {
-    const type = await sendClassify(companyName);
-    if (placeholder.isConnected) placeholder.remove();
-    card.removeAttribute(DATA_LOADING);
-    if (!type) {
-      card.setAttribute(DATA_FAILED, String(Date.now()));
-      return;
-    }
-    card.setAttribute(DATA_PROCESSED, 'true');
-    card.setAttribute(DATA_TYPE, type);
-    card.removeAttribute(DATA_FAILED);
-    if (type === 'Client') {
-      prefetchFinancialDataForClient(card, companyName);
+  if (!type) {
+    card.setAttribute(DATA_FAILED, String(Date.now()));
+    return;
+  }
+
+  card.setAttribute(DATA_PROCESSED, 'true');
+  card.setAttribute(DATA_TYPE, type);
+  card.removeAttribute(DATA_FAILED);
+
+  const companyName = extractCompanyName(findCompanyElementInCard(card));
+  if (type === 'Client') {
+    if (companyName) prefetchFinancialDataForClient(card, companyName);
+    if (!pnSuppressClientClassifiedEvent) {
       try {
         document.dispatchEvent(new CustomEvent('pn-client-classified', { detail: { card } }));
       } catch (_) {}
     }
-    const el = findCompanyElementInCard(card);
-    if (el && !isNodeInJobDetailsComposed(el)) {
-      el.querySelectorAll('.pn-badge').forEach((b) => b.remove());
-      el.appendChild(createBadge(type));
-    }
-  } catch (_) {
-    if (placeholder.isConnected) placeholder.remove();
-    card.removeAttribute(DATA_LOADING);
-    card.setAttribute(DATA_FAILED, String(Date.now()));
+  }
+
+  const el = getBadgeHostElement(card);
+  if (el && !isNodeInJobDetailsComposed(card)) {
+    el.querySelectorAll('.pn-badge').forEach((b) => b.remove());
+    el.appendChild(createBadge(type));
   }
 }
 
-let classifyDebounce = null;
+/** Pendant le batch post-scroll : pas d’événements qui relancent l’auto-open. */
+let pnSuppressClientClassifiedEvent = false;
+
+let classificationPassRunning = false;
+
+function pnIsLoadingStuckOnCard(card) {
+  if (!card?.hasAttribute?.(DATA_LOADING)) return false;
+  const at = Number(card.getAttribute(DATA_LOADING_AT) || '0');
+  return !at || Date.now() - at >= PN_LOADING_STUCK_MS;
+}
 
 async function runClassificationPass() {
   if (!isClassificationTargetPage()) return;
+  if (!pnListAllowsClassificationNow()) return;
+  if (classificationPassRunning) return;
 
   const passStarted = performance.now();
   const cards = collectJobCards();
-  const todo = [];
+  /** @type {Map<string, HTMLElement[]>} */
+  const byCompany = new Map();
+
   for (const card of cards) {
     if (card.hasAttribute(DATA_PROCESSED)) {
       ensureBadgeOnProcessedCard(card);
       continue;
     }
-    if (card.hasAttribute(DATA_LOADING)) continue;
+    if (card.hasAttribute(DATA_LOADING)) {
+      if (!pnIsLoadingStuckOnCard(card)) continue;
+      clearCardLoadingState(card);
+    }
     const failedAt = Number(card.getAttribute(DATA_FAILED) || '0');
     if (failedAt && Date.now() - failedAt < 15000) continue;
     const cel = findCompanyElementInCard(card);
     const name = extractCompanyName(cel);
     if (!name || name.length < 2) continue;
-    todo.push(card);
+    if (!byCompany.has(name)) byCompany.set(name, []);
+    byCompany.get(name).push(card);
   }
 
-  const concurrency = 3;
-  let wi = 0;
-  async function worker() {
-    while (true) {
-      const idx = wi++;
-      if (idx >= todo.length) return;
-      const card = todo[idx];
-      if (card?.isConnected) await processCard(card);
+  const companyNames = [...byCompany.keys()];
+  if (!companyNames.length) return;
+
+  classificationPassRunning = true;
+  pnSuppressClientClassifiedEvent = true;
+  if (typeof jdLog === 'function') {
+    jdLog('jd_classify', { st: 'start', co: companyNames.length });
+  }
+  try {
+    for (const cardList of byCompany.values()) {
+      for (const card of cardList) {
+        if (card?.isConnected) setCardLoadingBadge(card);
+      }
     }
-  }
-  const n = Math.min(concurrency, Math.max(1, todo.length));
-  await Promise.all(Array.from({ length: n }, () => worker()));
 
-  const passMs = Math.round(performance.now() - passStarted);
-  if (typeof pnRecordClassificationPass === 'function') {
-    pnRecordClassificationPass(passMs, todo.length);
+    const types = await sendClassifyBatch(companyNames);
+
+    for (const [name, cardList] of byCompany) {
+      const type = types[name] === 'Client' || types[name] === 'SS2I' ? types[name] : null;
+      for (const card of cardList) {
+        if (card?.isConnected) applyClassificationToCard(card, type);
+      }
+    }
+
+    const passMs = Math.round(performance.now() - passStarted);
+    let cardCount = 0;
+    for (const list of byCompany.values()) cardCount += list.length;
+    if (typeof jdLog === 'function') {
+      jdLog('jd_classify', { st: 'done', co: companyNames.length, cards: cardCount, ms: passMs });
+    }
+    if (typeof pnRecordClassificationPass === 'function') {
+      pnRecordClassificationPass(passMs, cardCount);
+    }
+  } catch (e) {
+    if (typeof jdLog === 'function') {
+      jdLog('jd_classify', {
+        st: 'err',
+        m: String(e?.message || e).slice(0, 120)
+      });
+    }
+  } finally {
+    for (const cardList of byCompany.values()) {
+      for (const card of cardList) {
+        if (card?.isConnected && card.hasAttribute(DATA_LOADING)) {
+          applyClassificationToCard(card, null);
+        }
+      }
+    }
+    pnSuppressClientClassifiedEvent = false;
+    classificationPassRunning = false;
   }
 }
 
-function scheduleClassification() {
-  if (!isClassificationTargetPage()) return;
-  if (classifyDebounce) clearTimeout(classifyDebounce);
-  classifyDebounce = setTimeout(() => {
-    classifyDebounce = null;
-    void runClassificationPass();
-  }, 140);
-}
+try {
+  window.pnRunClassificationPassAfterScroll = runClassificationPass;
+} catch (_) {}

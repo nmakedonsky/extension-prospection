@@ -7,7 +7,15 @@
 
   /** Plafond cohérent avec llmExtractor.js */
   const MERGER_MONEY_MAX_ABS = 12e12;
-  const MERGER_MONEY_FIELDS = ['revenue', 'revenue_previous', 'ebitda', 'operating_cash_flow', 'free_cash_flow', 'market_cap'];
+  const MERGER_MONEY_FIELDS = [
+    'revenue',
+    'revenue_previous',
+    'net_income',
+    'ebitda',
+    'operating_cash_flow',
+    'free_cash_flow',
+    'market_cap'
+  ];
 
   function mergeFinancials(baseFinancials, llmFinancials) {
     const base = { ...(baseFinancials || {}) };
@@ -25,6 +33,7 @@
       'reporting_currency',
       'revenue',
       'revenue_previous',
+      'net_income',
       'ebitda',
       'ebitda_margin',
       'net_margin',
@@ -56,6 +65,7 @@
     out.reporting_currency = curRaw === 'USD' ? 'USD' : curRaw === 'EUR' ? 'EUR' : null;
     out.revenue = toNumberOrNull(out.revenue);
     out.revenue_previous = toNumberOrNull(out.revenue_previous);
+    out.net_income = toNumberOrNull(out.net_income);
     out.ebitda = toNumberOrNull(out.ebitda);
     out.ebitda_margin = toNumberOrNull(out.ebitda_margin);
     out.net_margin = toNumberOrNull(out.net_margin);
@@ -74,6 +84,9 @@
     out.employees = toNumberOrNull(out.employees);
     out.market_cap = toNumberOrNull(out.market_cap);
     if (out.operating_cashflow_positive != null) out.operating_cashflow_positive = !!out.operating_cashflow_positive;
+    if (typeof self.llmFinancialHarmonize === 'function') {
+      return self.llmFinancialHarmonize(out);
+    }
     return out;
   }
 

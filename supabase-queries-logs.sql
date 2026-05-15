@@ -66,6 +66,12 @@ WHERE source IN ('extension-prospection', 'extension-prospection-next')
 GROUP BY event
 ORDER BY n DESC;
 
+-- 9b) Forcer un re-fetch Gemini (ex. Thales RN/sal. corrigé) — vide le cache financier d'une entreprise
+-- UPDATE companies
+-- SET financial_pipeline_cache = NULL, financial_pipeline_cache_at = NULL,
+--     unified_payload = NULL, llm_payload = NULL, llm_updated_at = NULL, updated_at = NOW()
+-- WHERE lower(company_name) = 'thales';
+
 -- 9) Reset CA corrompus : efface le cache financier des entreprises dont le CA dépasse 12 000 Md
 --    (données mal mises à l'échelle avec l'ancienne version du code)
 --    ⚠ Exécuter puis recharger LinkedIn pour déclencher un re-fetch Gemini

@@ -216,20 +216,29 @@ async function swHasFreshFinancialData(companyName) {
   return false;
 }
 
+function swHarmonizeUnifiedFinancials(unified) {
+  if (!unified?.financials || typeof self.llmFinancialHarmonize !== 'function') return unified;
+  return {
+    ...unified,
+    financials: self.llmFinancialHarmonize(unified.financials)
+  };
+}
+
 function swAttachScoreBreakdownIfNeeded(unified) {
   if (!unified) return null;
-  if (!unified.financials) return unified;
-  if (unified.score_breakdown && unified.score_breakdown.model_version === 4) return unified;
+  const harmonized = swHarmonizeUnifiedFinancials(unified);
+  if (!harmonized.financials) return harmonized;
+  if (harmonized.score_breakdown && harmonized.score_breakdown.model_version === 4) return harmonized;
   try {
-    const bd = self.scoring.computeScoreBreakdown(unified);
+    const bd = self.scoring.computeScoreBreakdown(harmonized);
     return {
-      ...unified,
+      ...harmonized,
       score: bd.score,
       score_breakdown: bd,
-      confidence: self.scoring.computeConfidence({ ...unified, score: bd.score, score_breakdown: bd })
+      confidence: self.scoring.computeConfidence({ ...harmonized, score: bd.score, score_breakdown: bd })
     };
   } catch (_) {
-    return unified;
+    return harmonized;
   }
 }
 

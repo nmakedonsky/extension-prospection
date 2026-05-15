@@ -23,7 +23,8 @@ try {
 }
 
 const STORAGE_KEY_CONFIG = 'config';
-const STORAGE_KEY_COMPANIES = 'prospectionCompaniesCache';
+/** Ancien cache local sociétés — supprimé au démarrage (source de vérité : table `companies`). */
+const LEGACY_COMPANIES_CACHE_KEY = 'prospectionCompaniesCache';
 const SUPABASE_LOGS_TABLE = 'extension_logs';
 const SUPABASE_COMPANIES_TABLE = 'companies';
 const EXTENSION_SOURCE = 'extension-prospection';
@@ -72,6 +73,23 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
 const inflightClassify = new Map();
+/** Cache RAM session (onglet) — persistance = table Supabase `companies` uniquement. */
+const memoryCompaniesType = new Map();
+const COMPANIES_MEMORY_MAX_ENTRIES = 800;
+const SUPABASE_COMPANIES_IN_CHUNK = 40;
+
+function rememberCompanyTypeInMemory(companyName, type) {
+  if (type !== 'Client' && type !== 'SS2I') return;
+  memoryCompaniesType.set(companyName, type);
+  while (memoryCompaniesType.size > COMPANIES_MEMORY_MAX_ENTRIES) {
+    const oldest = memoryCompaniesType.keys().next().value;
+    if (oldest != null) memoryCompaniesType.delete(oldest);
+  }
+}
+
+try {
+  chrome.storage.local.remove('prospectionCompaniesCache');
+} catch (_) {}
 
 const SENDPILOT_API_BASE = 'https://api.sendpilot.ai/v1';
 
@@ -322,30 +340,60 @@ Entreprise : "${String(companyName || '').replace(/"/g, '\\"')}"`;
   throw lastError || new Error(`Gemini ${GEMINI_MODEL_ID} a échoué`);
 }
 
+function quoteSupabaseInValue(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 async function getCompanyFromSupabase(companyName) {
+  const batch = await getCompaniesFromSupabaseBatch([companyName]);
+  return batch[companyName] || null;
+}
+
+/**
+ * @param {string[]} companyNames
+ * @returns {Promise<Record<string, 'Client'|'SS2I'>>}
+ */
+async function getCompaniesFromSupabaseBatch(companyNames) {
+  const out = {};
+  const names = [
+    ...new Set(
+      (companyNames || [])
+        .map((n) => String(n || '').trim())
+        .filter((n) => n.length >= 2)
+    )
+  ];
+  if (!names.length) return out;
+
   const config = await loadConfig();
   const url = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
   const key = String(config.supabaseAnonKey || '').trim();
-  if (!url || !key) return null;
-  try {
-    const res = await fetch(
-      `${url}/rest/v1/${SUPABASE_COMPANIES_TABLE}?company_name=eq.${encodeURIComponent(companyName)}&select=type`,
-      {
-        method: 'GET',
-        headers: {
-          apikey: key,
-          Authorization: `Bearer ${key}`,
-          'Content-Type': 'application/json'
-        }
+  if (!url || !key) return out;
+
+  const headers = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json'
+  };
+
+  for (let i = 0; i < names.length; i += SUPABASE_COMPANIES_IN_CHUNK) {
+    const chunk = names.slice(i, i + SUPABASE_COMPANIES_IN_CHUNK);
+    const inList = chunk.map(quoteSupabaseInValue).join(',');
+    try {
+      const res = await fetch(
+        `${url}/rest/v1/${SUPABASE_COMPANIES_TABLE}?company_name=in.(${inList})&select=company_name,type`,
+        { method: 'GET', headers }
+      );
+      if (!res.ok) continue;
+      const rows = await res.json();
+      if (!Array.isArray(rows)) continue;
+      for (const row of rows) {
+        const n = String(row?.company_name || '').trim();
+        const t = row?.type;
+        if (n && (t === 'Client' || t === 'SS2I')) out[n] = t;
       }
-    );
-    if (!res.ok) return null;
-    const rows = await res.json();
-    const t = rows?.[0]?.type;
-    return t === 'Client' || t === 'SS2I' ? t : null;
-  } catch (_) {
-    return null;
+    } catch (_) {}
   }
+  return out;
 }
 
 async function upsertCompanyToSupabase(companyName, type) {
@@ -378,33 +426,11 @@ async function upsertCompanyToSupabase(companyName, type) {
 }
 
 /**
- * Cache local → Supabase → Gemini ; dédoublonne les appels en cours par nom d’entreprise.
- * @param {string} companyName
+ * Gemini + upsert Supabase (une société).
+ * @param {string} trimmed
  * @returns {Promise<'Client'|'SS2I'|null>}
  */
-async function getOrClassifyCompany(companyName) {
-  const trimmed = String(companyName || '').trim();
-  if (!trimmed) return null;
-
-  const stored = await chrome.storage.local.get(STORAGE_KEY_COMPANIES);
-  const companies = stored[STORAGE_KEY_COMPANIES] || {};
-  if (companies[trimmed] === 'Client' || companies[trimmed] === 'SS2I') {
-    upsertCompanyToSupabase(trimmed, companies[trimmed]).catch(() => {});
-    return companies[trimmed];
-  }
-
-  const fromDb = await getCompanyFromSupabase(trimmed);
-  if (fromDb) {
-    void logToSupabase('company_classified', {
-      company_name: trimmed.slice(0, 120),
-      type: fromDb,
-      via: 'supabase'
-    });
-    companies[trimmed] = fromDb;
-    await chrome.storage.local.set({ [STORAGE_KEY_COMPANIES]: companies });
-    return fromDb;
-  }
-
+async function classifyWithGeminiAndPersist(trimmed) {
   if (inflightClassify.has(trimmed)) {
     return inflightClassify.get(trimmed);
   }
@@ -418,10 +444,7 @@ async function getOrClassifyCompany(companyName) {
         via: 'gemini'
       });
       await upsertCompanyToSupabase(trimmed, type);
-      const r2 = await chrome.storage.local.get(STORAGE_KEY_COMPANIES);
-      const c2 = r2[STORAGE_KEY_COMPANIES] || {};
-      c2[trimmed] = type;
-      await chrome.storage.local.set({ [STORAGE_KEY_COMPANIES]: c2 });
+      rememberCompanyTypeInMemory(trimmed, type);
       return type;
     } catch (e) {
       console.warn('[Prospection BG] Classification:', trimmed, e?.message || e);
@@ -441,6 +464,95 @@ async function getOrClassifyCompany(companyName) {
 
   inflightClassify.set(trimmed, task);
   return task;
+}
+
+/**
+ * RAM session → Supabase (batch) → Gemini pour les inconnues.
+ * @param {string} companyName
+ * @returns {Promise<'Client'|'SS2I'|null>}
+ */
+async function getOrClassifyCompany(companyName) {
+  const trimmed = String(companyName || '').trim();
+  if (!trimmed) return null;
+
+  const memType = memoryCompaniesType.get(trimmed);
+  if (memType === 'Client' || memType === 'SS2I') {
+    return memType;
+  }
+
+  const fromDb = await getCompanyFromSupabase(trimmed);
+  if (fromDb) {
+    void logToSupabase('company_classified', {
+      company_name: trimmed.slice(0, 120),
+      type: fromDb,
+      via: 'supabase'
+    });
+    rememberCompanyTypeInMemory(trimmed, fromDb);
+    return fromDb;
+  }
+
+  return classifyWithGeminiAndPersist(trimmed);
+}
+
+/**
+ * @param {string[]} companyNames
+ * @returns {Promise<Record<string, 'Client'|'SS2I'|null>>}
+ */
+async function classifyCompaniesBatch(companyNames) {
+  const unique = [
+    ...new Set(
+      (companyNames || [])
+        .map((n) => String(n || '').trim())
+        .filter((n) => n.length >= 2)
+    )
+  ];
+  const out = {};
+  if (!unique.length) return out;
+
+  const needDb = [];
+  for (const n of unique) {
+    const mem = memoryCompaniesType.get(n);
+    if (mem === 'Client' || mem === 'SS2I') {
+      out[n] = mem;
+    } else {
+      needDb.push(n);
+    }
+  }
+
+  if (needDb.length) {
+    const fromDb = await getCompaniesFromSupabaseBatch(needDb);
+    for (const [n, t] of Object.entries(fromDb)) {
+      rememberCompanyTypeInMemory(n, t);
+      out[n] = t;
+      void logToSupabase('company_classified', {
+        company_name: n.slice(0, 120),
+        type: t,
+        via: 'supabase'
+      });
+    }
+  }
+
+  const needGemini = unique.filter((n) => !out[n]);
+  if (!needGemini.length) return out;
+
+  const concurrency = 3;
+  let nextIdx = 0;
+  async function worker() {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= needGemini.length) return;
+      const n = needGemini[idx];
+      const type = await classifyWithGeminiAndPersist(n);
+      if (type) out[n] = type;
+    }
+  }
+  const nWorkers = Math.min(concurrency, needGemini.length);
+  await Promise.all(Array.from({ length: nWorkers }, () => worker()));
+
+  for (const n of unique) {
+    if (!(n in out)) out[n] = null;
+  }
+  return out;
 }
 
 function sanitizeJsonValue(value, depth = 0) {
@@ -681,6 +793,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     getOrClassifyCompany(name)
       .then((type) => sendResponse(type))
       .catch(() => sendResponse(null));
+    return true;
+  }
+
+  if (msg.type === 'CLASSIFY_COMPANIES_BATCH') {
+    const names = Array.isArray(msg.companyNames) ? msg.companyNames : [];
+    classifyCompaniesBatch(names)
+      .then((types) => sendResponse(types))
+      .catch(() => sendResponse({}));
     return true;
   }
 

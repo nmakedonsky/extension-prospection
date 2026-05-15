@@ -15,7 +15,7 @@ function tick() {
   }
   const payload = buildScanPayload();
   sendHeartbeat(payload, false);
-  scheduleClassification();
+  // Classification / badges : uniquement via pnRunListWorkflowAfterFullScroll (fin de scroll).
 }
 
 let scheduled = false;

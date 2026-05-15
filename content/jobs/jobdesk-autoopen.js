@@ -35,8 +35,6 @@ const JD_SCROLL_ROOT_SELECTORS = [
 ];
 const JD_FULLY_SCROLLED_LIST_KEYS = new Set();
 const JD_OPENED_CLIENT_IDS_BY_LIST_KEY = new Map();
-const JD_LIST_KEYS_SEEN_NOT_BOTTOM = new Set();
-const JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY = new Set();
 
 function scheduleJobsTabSupabaseFlush() {
   if (jobsTabSupabaseFlushTimer) clearTimeout(jobsTabSupabaseFlushTimer);
@@ -77,8 +75,6 @@ function jdPruneSmallSet(s, max = 12) {
 function jdClearListGatingState(lk) {
   if (!lk) return;
   JD_FULLY_SCROLLED_LIST_KEYS.delete(lk);
-  JD_LIST_KEYS_SEEN_NOT_BOTTOM.delete(lk);
-  JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY.delete(lk);
 }
 
 function jdPruneOpenedIdsMap() {
@@ -132,7 +128,14 @@ function jdGetLikelyJobsListScrollRoot() {
       return el;
     }
   }
-  const cards = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`) || [];
+  if (typeof collectJobCards === 'function') {
+    for (const card of collectJobCards()) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(card)) continue;
+      const root = jdFindScrollableAncestor(card);
+      if (root) return root;
+    }
+  }
+  const cards = querySelectorAllDeep(document, `[${DATA_PROCESSED}]`) || [];
   for (const card of cards) {
     if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(card)) continue;
     const root = jdFindScrollableAncestor(card);
@@ -165,40 +168,6 @@ function jdIsCurrentListFullyScrolled() {
   return JD_FULLY_SCROLLED_LIST_KEYS.has(lk);
 }
 
-function jdTrackCurrentListScrollProgress() {
-  const lk = jdListPageKey();
-  if (!lk) return;
-  const root = jdGetLikelyJobsListScrollRoot();
-  let isBottom = false;
-  let sawScrollActivity = false;
-  if (root) {
-    const dist = root.scrollHeight - (root.scrollTop + root.clientHeight);
-    isBottom = dist <= JD_SCROLL_BOTTOM_EPSILON_PX;
-    sawScrollActivity = root.scrollTop > 10;
-  } else {
-    try {
-      const de = document.documentElement;
-      const db = document.body;
-      const scrollTop = window.scrollY || de?.scrollTop || db?.scrollTop || 0;
-      const clientHeight = window.innerHeight || de?.clientHeight || 0;
-      const scrollHeight = Math.max(de?.scrollHeight || 0, db?.scrollHeight || 0);
-      isBottom = scrollHeight - (scrollTop + clientHeight) <= JD_SCROLL_BOTTOM_EPSILON_PX;
-      sawScrollActivity = scrollTop > 10;
-    } catch (_) {
-      return;
-    }
-  }
-  if (!isBottom) JD_LIST_KEYS_SEEN_NOT_BOTTOM.add(lk);
-  if (sawScrollActivity) JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY.add(lk);
-}
-
-function jdCanMarkCurrentListFullyScrolled() {
-  const lk = jdListPageKey();
-  if (!lk) return false;
-  if (!jdHasReachedBottomForCurrentList()) return false;
-  return JD_LIST_KEYS_SEEN_NOT_BOTTOM.has(lk) && JD_LIST_KEYS_SEEN_SCROLL_ACTIVITY.has(lk);
-}
-
 function jdMarkCurrentListFullyScrolled(reason = '') {
   const lk = jdListPageKey();
   if (!lk) return false;
@@ -206,6 +175,55 @@ function jdMarkCurrentListFullyScrolled(reason = '') {
   jdPruneSmallSet(JD_FULLY_SCROLLED_LIST_KEYS, 12);
   JD_FULLY_SCROLLED_LIST_KEYS.add(lk);
   jdLog('jd_gate', { lk, y: 'open', r: String(reason || '').slice(0, 60) });
+  return true;
+}
+
+let __jdScrollRootHooked = null;
+let __jdScrollEndTimer = null;
+const JD_SCROLL_END_MS = 280;
+
+/** Scroll terminé + bas de liste → badges puis clics. */
+function jdOnListScrollFinished() {
+  mergeSeenClientJobsFromDom();
+  if (!jdHasReachedBottomForCurrentList()) return;
+  jdTryStartListWorkflow('scroll-finished');
+}
+
+function jdScheduleScrollFinishedCheck() {
+  if (__jdScrollEndTimer) clearTimeout(__jdScrollEndTimer);
+  __jdScrollEndTimer = setTimeout(() => {
+    __jdScrollEndTimer = null;
+    jdOnListScrollFinished();
+  }, JD_SCROLL_END_MS);
+}
+
+/** Le scroll de la liste LinkedIn ne remonte pas à document : écouter le panneau liste. */
+function jdEnsureListScrollRootListener() {
+  const root = jdGetLikelyJobsListScrollRoot();
+  if (!root) return null;
+  if (__jdScrollRootHooked === root) return root;
+  __jdScrollRootHooked = root;
+  try {
+    root.addEventListener('scroll', jdScheduleScrollFinishedCheck, { passive: true });
+    root.addEventListener('scrollend', jdOnListScrollFinished, { passive: true });
+  } catch (_) {
+    try {
+      root.addEventListener('scroll', jdScheduleScrollFinishedCheck, { passive: true });
+    } catch (_) {}
+  }
+  return root;
+}
+
+/** Démarre le workflow (badges → clics Client). Idempotent : pnListWorkflowRunning bloque les doublons. */
+function jdTryStartListWorkflow(reason = '') {
+  if (!jdHasReachedBottomForCurrentList()) return false;
+  jdMarkCurrentListFullyScrolled(reason);
+  if (typeof window.pnRunListWorkflowAfterFullScroll !== 'function') {
+    jdLog('jd_fail', { m: 'no_workflow_fn', r: String(reason || '').slice(0, 48) });
+    return false;
+  }
+  jdLog('jd_wf', { r: String(reason || '').slice(0, 48) });
+  void window.pnRunListWorkflowAfterFullScroll(reason);
   return true;
 }
 
@@ -694,28 +712,12 @@ function requestAutoOpenRun(reason = '') {
   }, delay);
 }
 
-function runAutoOpenImmediatelyAfterFullScroll(reason = '') {
-  lastJdRunReason = String(reason || 'full-scroll-ready').slice(0, 80);
-  if (!pnTabVisibleForAutoOpen()) {
-    deferredAutoOpenWhileTabHidden = true;
-    return;
-  }
-  if (openClientJobsSequenceRunning) {
-    autoOpenRunQueued = true;
-    return;
-  }
-  if (autoOpenCoalesceTimer) {
-    clearTimeout(autoOpenCoalesceTimer);
-    autoOpenCoalesceTimer = null;
-  }
-  lastAutoOpenRunAt = Date.now();
-  void tryAutoOpenNewVisibleClientJobs();
-}
-
 function scheduleAutoOpenAfterClientClassified() {
+  if (!jdIsCurrentListFullyScrolled()) return;
   if (autoOpenAfterClientTimer) clearTimeout(autoOpenAfterClientTimer);
   autoOpenAfterClientTimer = setTimeout(() => {
     autoOpenAfterClientTimer = null;
+    if (!jdIsCurrentListFullyScrolled()) return;
     requestAutoOpenRun('after-client-classified');
   }, AUTO_OPEN_AFTER_CLIENT_MS);
 }
@@ -913,34 +915,26 @@ function debounce(fn, ms) {
 }
 
 const debouncedAutoOpenClientJobs = debounce(() => {
-  mergeSeenClientJobsFromDom();
-  jdTrackCurrentListScrollProgress();
-  if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('scroll-debounce')) {
-    runAutoOpenImmediatelyAfterFullScroll('full-scroll-ready|scroll-debounce');
-  }
+  jdEnsureListScrollRootListener();
+  jdScheduleScrollFinishedCheck();
   const now = Date.now();
   if (now - __jdLastScrollLogAt >= JD_SCROLL_LOG_MS) {
     __jdLastScrollLogAt = now;
     const sample = jdClientIdsSample(18, 200);
     jdLog('jd_scroll', { ids: sample.s, n: sample.n, r: 'scroll-debounce' });
   }
-  requestAutoOpenRun('scroll-debounce');
 }, 650);
 
 const debouncedAutoOpenOnMutation = debounce(() => {
-  mergeSeenClientJobsFromDom();
-  jdTrackCurrentListScrollProgress();
-  if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('dom-mutation')) {
-    runAutoOpenImmediatelyAfterFullScroll('full-scroll-ready|dom-mutation');
-  }
-  requestAutoOpenRun('dom-mutation');
+  jdEnsureListScrollRootListener();
+  if (jdHasReachedBottomForCurrentList()) jdOnListScrollFinished();
 }, 850);
 
 function installPnHistoryAutoOpenListener() {
   if (window.__pnHistoryAutoOpenListener) return;
   window.__pnHistoryAutoOpenListener = true;
   const onPathChange = () => {
-    requestAutoOpenRun('path-change');
+    /* Nouvelle liste : le workflow repart après un scroll complet. */
   };
   try {
     const wrap = (name) => {
@@ -973,12 +967,8 @@ function attachAutoOpenScrollListeners() {
   document.addEventListener(
     'scrollend',
     () => {
-      mergeSeenClientJobsFromDom();
-      jdTrackCurrentListScrollProgress();
-      if (jdCanMarkCurrentListFullyScrolled() && jdMarkCurrentListFullyScrolled('scrollend')) {
-        runAutoOpenImmediatelyAfterFullScroll('full-scroll-ready|scrollend');
-      }
-      requestAutoOpenRun('scrollend');
+      jdEnsureListScrollRootListener();
+      jdOnListScrollFinished();
     },
     { passive: true, capture: true }
   );
@@ -1008,7 +998,9 @@ function installAutoOpenVisibilityListener() {
         return;
       }
       deferredAutoOpenWhileTabHidden = false;
-      requestAutoOpenRun('tab-visible');
+      if (jdIsCurrentListFullyScrolled()) {
+        requestAutoOpenRun('tab-visible-resume');
+      }
     },
     false
   );
@@ -1050,6 +1042,11 @@ function installAutoOpenVisibilityListener() {
     { capture: true }
   );
 
-  setTimeout(() => requestAutoOpenRun('init-3500'), 3500);
-  setTimeout(() => requestAutoOpenRun('init-9500'), 9500);
+  jdEnsureListScrollRootListener();
+
+  /** Liste courte : tout visible sans scroll. */
+  setTimeout(() => {
+    jdEnsureListScrollRootListener();
+    jdOnListScrollFinished();
+  }, 3500);
 })();

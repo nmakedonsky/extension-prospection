@@ -30,6 +30,22 @@ const JOB_METADATA_ITEM_SELECTORS = [
   '[class*="jobs-unified-top-card__job-insight"]'
 ];
 
+/** Ligne sous le titre (souvent « lieu · modalité » ou « entreprise · lieu ») — plus fiable que le 1er pill. */
+const JOB_DETAIL_LOCATION_LINE_SELECTORS = [
+  '.job-details-jobs-unified-top-card__primary-description-without-tagline',
+  '[class*="job-details-jobs-unified-top-card__primary-description-without-tagline"]',
+  '.jobs-unified-top-card__primary-description-without-tagline',
+  '[class*="jobs-unified-top-card__primary-description-without-tagline"]',
+  '.job-details-jobs-unified-top-card__primary-description-with-tagline',
+  '[class*="job-details-jobs-unified-top-card__primary-description-with-tagline"]',
+  '.jobs-unified-top-card__primary-description-with-tagline',
+  '[class*="jobs-unified-top-card__primary-description-with-tagline"]',
+  '.job-details-jobs-unified-top-card__tertiary-description',
+  '[class*="job-details-jobs-unified-top-card__tertiary-description"]',
+  '.jobs-unified-top-card__tertiary-description',
+  '[class*="jobs-unified-top-card__tertiary-description"]'
+];
+
 let lastSavedJobFingerprint = null;
 
 function jdScPageKey() {
@@ -102,9 +118,114 @@ function getAllTexts(root, selectors) {
   return Array.from(new Set(values));
 }
 
-function splitJobMetadata(metadataItems) {
-  const location = metadataItems[0] || '';
-  const details = metadataItems.slice(1).join(' | ');
+/** Statuts / dates / badges LinkedIn — pas un lieu (FR + EN). */
+function jdIsJobMetadataNoise(s) {
+  const t = pnNormalizeText(s);
+  if (!t || t.length > 220) return true;
+  if (t.length < 2) return true;
+  const low = t.toLowerCase();
+  if (
+    /^(consulté|enregistré|sponsorisé|promu|promue|republié|republiée|nouveau|nouvelle|archivé|archivée)$/i.test(
+      t
+    )
+  )
+    return true;
+  if (/^(viewed|saved|sponsored|promoted|reposted|new|archived)$/i.test(t)) return true;
+  if (/promu\(e\)|promu\s*\(e\)/i.test(t)) return true;
+  if (/candidature\s+simplifiée|easy\s+apply/i.test(low)) return true;
+  if (/il y a\s+\d+/i.test(t)) return true;
+  if (/\b\d+\s*(jour|jours|heure|heures|semaine|semaines|mois|an|ans)\b/i.test(t)) return true;
+  if (/\b\d+\s*(day|days|hour|hours|week|weeks|month|months|year|years)\s+ago\b/i.test(low)) return true;
+  if (/\bactive\s+today\b/i.test(low)) return true;
+  if (/publiée?\s+le|posted\s+on|posted\s+about/i.test(low)) return true;
+  if (/^[\d\s,+–\-–]+(k|m|€|\$|£|%|\/yr|\/an|par\s+an)?$/i.test(t) && t.length < 35) return true;
+  if (/\d+\s*[-–]\s*\d+\s*(employés|employees)/i.test(t)) return true;
+  if (/^\d+\s*applications?$/i.test(t)) return true;
+  if (/^voir\s+les\s+candidats/i.test(low)) return true;
+  return false;
+}
+
+/** Indice géographique (ville, région, pays, remote, fuseau). */
+function jdLooksLikeGeographicLocation(s) {
+  const t = pnNormalizeText(s);
+  if (!t || t.length < 2 || t.length > 200) return false;
+  if (jdIsJobMetadataNoise(t)) return false;
+  if (/[·|]/.test(t)) {
+    const parts = t.split(/[·|]/).map((p) => pnNormalizeText(p)).filter(Boolean);
+    return parts.some((p) => jdLooksLikeGeographicLocation(p));
+  }
+  const low = t.toLowerCase();
+  if (
+    /,|\(|\)|\b(région|metropolitan|county|area|remote|télétravail|hybrid|hybride|on-?site|sur\s+site|worldwide|europe|france|germany|uk|usa|canada|spain|italy|belgium|switzerland|india|china|japan|brazil|mexico|australia)\b/i.test(
+      t
+    )
+  )
+    return true;
+  if (/\b(ile-de-france|île-de-france|idf|auvergne|normandie|bretagne|occitanie)\b/i.test(low)) return true;
+  if (/\b[a-zà-öø-ÿ][a-zà-öø-ÿ'\-]+,\s*[a-zà-öø-ÿ][a-zà-öø-ÿ'\-]+/i.test(t)) return true;
+  if (/^(remote|télétravail|hybrid|hybride|on-?site|sur\s+site)$/i.test(t)) return true;
+  if (/^[A-ZÀÂÄÉÈÊËÎÏÔÖÙÛÜŸ][a-zàâäéèêëîïôöùûüÿç\-]{2,30}$/.test(t) && t.length <= 34) {
+    if (
+      /^(Product|Finance|Marketing|Business|Technical|Creative|People|Culture|Growth|Platform|Software|Hardware|Data|Design|Research)$/i.test(
+        t
+      )
+    )
+      return false;
+    if (t.length >= 5) return true;
+    if (/^(Nice|Lyon|Gap|Caen|Rome|Oslo|York|Bari|Sion|Agen|Albi|Arles|Dax|Lens|Metz|Reims|Tours)$/i.test(t))
+      return true;
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Lieu depuis la ligne primaire / tertiaire du top card (souvent « … · Paris, France »).
+ */
+function jdExtractLocationFromTopCardLines(detailsPanel) {
+  if (!detailsPanel?.querySelector) return '';
+  for (const sel of JOB_DETAIL_LOCATION_LINE_SELECTORS) {
+    let el;
+    try {
+      el = detailsPanel.querySelector(sel);
+    } catch (_) {
+      el = null;
+    }
+    const raw = pnNormalizeText(el?.innerText || el?.textContent || '');
+    if (!raw) continue;
+    const segments = raw
+      .split(/[·|]/)
+      .map((p) => pnNormalizeText(p))
+      .filter(Boolean);
+    for (const seg of segments) {
+      if (jdLooksLikeGeographicLocation(seg)) return seg;
+    }
+    if (jdLooksLikeGeographicLocation(raw)) return raw;
+  }
+  return '';
+}
+
+function pickJobLocationFromInsightTexts(metadataItems) {
+  const list = (metadataItems || []).map((x) => pnNormalizeText(x)).filter(Boolean);
+  for (const t of list) {
+    if (!jdIsJobMetadataNoise(t) && jdLooksLikeGeographicLocation(t)) return t;
+  }
+  for (const t of list) {
+    if (!jdIsJobMetadataNoise(t)) return t;
+  }
+  return '';
+}
+
+function splitJobMetadata(metadataItems, preferredLocation) {
+  const explicit = pnNormalizeText(preferredLocation || '');
+  const fromPreferred = explicit && !jdIsJobMetadataNoise(explicit) ? explicit : '';
+  const fromInsights = pickJobLocationFromInsightTexts(metadataItems);
+  const location = fromPreferred || fromInsights || '';
+  const locNorm = location ? pnNormalizeText(location) : '';
+  const details = (metadataItems || [])
+    .map((x) => pnNormalizeText(x))
+    .filter((t) => t && (!locNorm || pnNormalizeText(t) !== locNorm))
+    .join(' | ');
   return { location, details };
 }
 
@@ -129,7 +250,10 @@ function buildJobCardPayload(wrapper) {
   const companyName = getCompanyNameFromJobWrapper(wrapper);
   const linkedinJobId = getJobIdFromWrapper(wrapper, jobUrl);
   const metadataItems = getCardMetadata(wrapper);
-  const { location, details } = splitJobMetadata(metadataItems);
+  const hint =
+    typeof extractJobLocationHint === 'function' ? pnNormalizeText(extractJobLocationHint(wrapper) || '') : '';
+  const preferredCard = hint && jdLooksLikeGeographicLocation(hint) && !jdIsJobMetadataNoise(hint) ? hint : '';
+  const { location, details } = splitJobMetadata(metadataItems, preferredCard);
   if (!companyName && !jobTitle && !linkedinJobId && !jobUrl) return null;
 
   return {
@@ -181,7 +305,12 @@ function buildJobDetailsPayload(wrapper) {
   const jobUrl = pnNormalizeText(detailJobUrl || cardPayload.jobUrl || '');
   const linkedinJobId = getJobIdFromWrapper(wrapper, jobUrl);
   const metadataItems = getAllTexts(detailsPanel, JOB_METADATA_ITEM_SELECTORS);
-  const { location, details } = splitJobMetadata(metadataItems);
+  const fromTopCard = jdExtractLocationFromTopCardLines(detailsPanel);
+  const cardLoc = pnNormalizeText(cardPayload.location || '');
+  const preferredLoc =
+    (fromTopCard && !jdIsJobMetadataNoise(fromTopCard) ? fromTopCard : '') ||
+    (cardLoc && jdLooksLikeGeographicLocation(cardLoc) && !jdIsJobMetadataNoise(cardLoc) ? cardLoc : '');
+  const { location, details } = splitJobMetadata(metadataItems, preferredLoc);
   const companyType = wrapper?.getAttribute?.(DATA_TYPE) || null;
   const descriptionHtml = descriptionEl?.innerHTML ? String(descriptionEl.innerHTML).trim() : '';
 

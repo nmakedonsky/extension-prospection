@@ -40,12 +40,57 @@
     return (R / E) / 1000;
   }
 
-  /** LLM ou calcul parfois en €/tête au lieu de k€/tête */
-  function coercePerEmployeeK(v) {
+  /** Montant agrégé (unités pleines) → k€ ou k$ par tête. */
+  function inferPerEmployeeKFromAbsolute(moneyAbsolute, employees) {
+    const M = Number(moneyAbsolute);
+    const E = Number(employees);
+    if (!Number.isFinite(M) || !Number.isFinite(E) || E <= 0) return null;
+    return (M / E) / 1000;
+  }
+
+  /** Résultat net / salarié à partir du CA/tête et de la marge nette (%). */
+  function inferNetIncomePerEmployeeKFromMargin(revenuePerEmployeeK, netMarginPct) {
+    const rpe = Number(revenuePerEmployeeK);
+    const m = Number(netMarginPct);
+    if (!Number.isFinite(rpe) || !Number.isFinite(m)) return null;
+    return rpe * (m / 100);
+  }
+
+  /**
+   * Normalise une métrique / tête en k€ (ou k$).
+   * - ≥ 50 000 : €/tête bruts → ÷1000
+   * - entre ~8× le CA/tête et 50 000 : idem (ex. 15 000–40 000 €)
+   * - &lt; 1 : souvent M€/tête (net_income_millions / employees) → ×1000
+   * Les valeurs déjà plausibles en k€ (ex. 15–400) ne sont pas modifiées.
+   */
+  function coercePerEmployeeK(v, referenceK) {
     if (v == null || !Number.isFinite(Number(v))) return null;
     let x = Number(v);
-    if (Math.abs(x) > 50000) x = x / 1000;
+    const ref =
+      referenceK != null && Number.isFinite(Number(referenceK)) && Number(referenceK) > 0
+        ? Number(referenceK)
+        : null;
+
+    if (Math.abs(x) >= 50000) x /= 1000;
+    else if (ref != null) {
+      if (Math.abs(x) >= ref * 8 && Math.abs(x) < 50000) x /= 1000;
+      else if (Math.abs(x) > 0 && Math.abs(x) < 1) x *= 1000;
+    }
+
     return x;
+  }
+
+  function relativeDelta(a, b) {
+    if (!Number.isFinite(Number(a)) || !Number.isFinite(Number(b))) return Infinity;
+    return Math.abs(Number(a) - Number(b)) / Math.max(Math.abs(Number(b)), 1);
+  }
+
+  /** Préfère le calcul dérivé si le LLM est incohérent (&gt; 45 % d'écart). */
+  function pickPerEmployeeK(llmK, inferredK) {
+    if (inferredK == null || !Number.isFinite(Number(inferredK))) return llmK ?? null;
+    if (llmK == null || !Number.isFinite(Number(llmK))) return inferredK;
+    if (relativeDelta(llmK, inferredK) > 0.45) return inferredK;
+    return llmK;
   }
 
   function normalizeReportingCurrency(llm) {
@@ -62,24 +107,62 @@
     return null;
   }
 
+  function harmonizeFinancialPerEmployee(financials) {
+    const out = { ...(financials || {}) };
+    const employees = Number(out.employees);
+    if (!Number.isFinite(employees) || employees <= 0) return out;
+
+    const revenue = out.revenue;
+    const rpeInferred = inferRevenuePerEmployeeK(revenue, employees);
+    if (rpeInferred != null) {
+      const rpe = out.revenue_per_employee;
+      if (rpe == null || relativeDelta(rpe, rpeInferred) > 0.3) {
+        out.revenue_per_employee = rpeInferred;
+      }
+    }
+
+    const rpeRef = out.revenue_per_employee;
+    const netIncome = out.net_income;
+    const netMargin = out.net_margin;
+    const freeCashFlow = out.free_cash_flow;
+
+    const niFromAbsolute = inferPerEmployeeKFromAbsolute(netIncome, employees);
+    const niFromMargin = inferNetIncomePerEmployeeKFromMargin(rpeRef, netMargin);
+    const niInferred = niFromAbsolute ?? niFromMargin;
+    const niLlm = coercePerEmployeeK(out.net_income_per_employee, rpeRef);
+    out.net_income_per_employee =
+      niFromAbsolute != null ? niFromAbsolute : pickPerEmployeeK(niLlm, niInferred);
+
+    const fcfFromAbsolute = inferPerEmployeeKFromAbsolute(freeCashFlow, employees);
+    const fcfLlm = coercePerEmployeeK(out.fcf_per_employee, rpeRef);
+    out.fcf_per_employee = fcfFromAbsolute != null ? fcfFromAbsolute : pickPerEmployeeK(fcfLlm, fcfFromAbsolute);
+
+    return out;
+  }
+
   function normalizeLlmFinancials(llm) {
     const reporting_currency = normalizeReportingCurrency(llm);
     const revenue = llmMoneyMillionsToAbsolute(getValue(llm?.revenue));
     const employees = getValue(llm?.employees);
+    const netIncome = llmMoneyMillionsToAbsolute(getValue(llm?.net_income) ?? getValue(llm?.netIncome));
     const revenuePerEmployeeRaw =
       getValue(llm?.revenuePerEmployee) ??
       (Number.isFinite(Number(revenue)) && Number.isFinite(Number(employees)) && Number(employees) > 0
         ? inferRevenuePerEmployeeK(revenue, employees)
         : null);
-    const revenuePerEmployee = coercePerEmployeeK(revenuePerEmployeeRaw);
-    return {
+    const revenuePerEmployee = coercePerEmployeeK(revenuePerEmployeeRaw, null);
+    const netMargin = getValue(llm?.net_margin);
+    const freeCashFlow = llmMoneyMillionsToAbsolute(getValue(llm?.free_cash_flow));
+
+    const financials = {
       reporting_currency,
       revenue: revenue ?? null,
       revenue_per_employee: revenuePerEmployee,
       employees: Number.isFinite(Number(employees)) ? Number(employees) : null,
+      net_income: netIncome ?? null,
       ebitda: llmMoneyMillionsToAbsolute(getValue(llm?.ebitda)),
       ebitda_margin: getValue(llm?.ebitda_margin),
-      net_margin: getValue(llm?.net_margin),
+      net_margin: netMargin,
       gross_margin: getValue(llm?.gross_margin),
       cash_to_total_assets: getValue(llm?.cash_to_total_assets),
       net_debt_ebitda: getValue(llm?.net_debt_ebitda),
@@ -90,11 +173,13 @@
       operating_cashflow_positive: getValue(llm?.operating_cashflow_positive),
       revenue_growth: getValue(llm?.revenue_growth),
       revenue_previous: llmMoneyMillionsToAbsolute(getValue(llm?.revenue_previous)),
-      net_income_per_employee: coercePerEmployeeK(getValue(llm?.net_income_per_employee)),
-      fcf_per_employee: coercePerEmployeeK(getValue(llm?.fcf_per_employee)),
-      free_cash_flow: llmMoneyMillionsToAbsolute(getValue(llm?.free_cash_flow)),
+      net_income_per_employee: coercePerEmployeeK(getValue(llm?.net_income_per_employee), revenuePerEmployee),
+      fcf_per_employee: coercePerEmployeeK(getValue(llm?.fcf_per_employee), revenuePerEmployee),
+      free_cash_flow: freeCashFlow,
       market_cap: llmMoneyMillionsToAbsolute(getValue(llm?.market_cap))
     };
+
+    return harmonizeFinancialPerEmployee(financials);
   }
 
   function normalizeLlmSignals(llm) {
@@ -137,5 +222,6 @@
     };
   }
 
-  self.llmExtractor = { extractFromWeb, extractFromCompanyContext };
+  self.llmFinancialHarmonize = harmonizeFinancialPerEmployee;
+  self.llmExtractor = { extractFromWeb, extractFromCompanyContext, harmonizeFinancialPerEmployee };
 })();
