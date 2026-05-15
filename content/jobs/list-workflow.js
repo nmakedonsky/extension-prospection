@@ -7,10 +7,11 @@ let pnListWorkflowRunning = false;
 
 async function pnRunListWorkflowAfterFullScroll(reason = '') {
   if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
-  if (typeof jdIsCurrentListFullyScrolled === 'function' && !jdIsCurrentListFullyScrolled()) return;
+  if (typeof window.jdIsListWorkflowActive === 'function' && !window.jdIsListWorkflowActive()) return;
   if (pnListWorkflowRunning) return;
 
   pnListWorkflowRunning = true;
+  let classifyOk = true;
   try {
     if (typeof jdLog === 'function') {
       jdLog('jd_wf', { st: 'run', r: String(reason || '').slice(0, 48) });
@@ -22,7 +23,14 @@ async function pnRunListWorkflowAfterFullScroll(reason = '') {
     if (typeof mergeSeenClientJobsFromDom === 'function') mergeSeenClientJobsFromDom();
 
     if (typeof window.pnRunClassificationPassAfterScroll === 'function') {
-      await window.pnRunClassificationPassAfterScroll();
+      classifyOk = (await window.pnRunClassificationPassAfterScroll()) !== false;
+    }
+
+    if (classifyOk && typeof window.jdMarkCurrentListFullyScrolled === 'function') {
+      window.jdMarkCurrentListFullyScrolled(reason);
+    } else if (!classifyOk && typeof window.jdAbortListWorkflowGate === 'function') {
+      window.jdAbortListWorkflowGate('classify_failed');
+      return;
     }
 
     if (typeof pnTabVisibleForAutoOpen === 'function' && !pnTabVisibleForAutoOpen()) {

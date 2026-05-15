@@ -34,6 +34,10 @@ const JD_SCROLL_ROOT_SELECTORS = [
   'main[role="main"]'
 ];
 const JD_FULLY_SCROLLED_LIST_KEYS = new Set();
+/** Workflow badges→clics en cours pour cette lk (gate validé seulement après classify OK). */
+const JD_WORKFLOW_IN_FLIGHT_KEYS = new Set();
+/** Liste (lk) pour laquelle l’utilisateur a scrollé le panneau jobs (évite badges avant scroll). */
+const JD_LIST_USER_SCROLLED_KEYS = new Set();
 const JD_OPENED_CLIENT_IDS_BY_LIST_KEY = new Map();
 
 function scheduleJobsTabSupabaseFlush() {
@@ -46,11 +50,35 @@ function scheduleJobsTabSupabaseFlush() {
   }, JD_NAV_SUPABASE_FLUSH_MS);
 }
 
+/**
+ * Clé complète par page LinkedIn (incluant `start`).
+ * Utilisée pour le gate "done" (JD_FULLY_SCROLLED_LIST_KEYS) : chaque page paginée a son propre gate.
+ */
 function jdListPageKey() {
   try {
     const u = new URL(location.href);
     const sp = new URLSearchParams(u.search);
     sp.delete('currentJobId');
+    sp.delete('cj');
+    const qs = sp.toString();
+    return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * Clé de base sans `start` — utilisée uniquement pour JD_WORKFLOW_IN_FLIGHT_KEYS.
+ * Pendant le scroll d'une liste, LinkedIn change start=0→25→50→75 ; cette clé reste stable
+ * et empêche les workflows en rafale sans bloquer les vraies pages suivantes.
+ */
+function jdListBaseKey() {
+  try {
+    const u = new URL(location.href);
+    const sp = new URLSearchParams(u.search);
+    sp.delete('currentJobId');
+    sp.delete('start');
+    sp.delete('cj');
     const qs = sp.toString();
     return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
   } catch (_) {
@@ -75,6 +103,27 @@ function jdPruneSmallSet(s, max = 12) {
 function jdClearListGatingState(lk) {
   if (!lk) return;
   JD_FULLY_SCROLLED_LIST_KEYS.delete(lk);
+  // In-flight uses base key (without start) — delete both to be safe
+  JD_WORKFLOW_IN_FLIGHT_KEYS.delete(lk);
+  JD_WORKFLOW_IN_FLIGHT_KEYS.delete(jdListBaseKey());
+  JD_LIST_USER_SCROLLED_KEYS.delete(lk);
+}
+
+/** Classification ou workflow interrompu : permet de relancer sans recharger la page. */
+function jdAbortListWorkflowGate(reason = '') {
+  const lk = jdListPageKey();
+  const bk = jdListBaseKey();
+  if (!lk) return;
+  JD_FULLY_SCROLLED_LIST_KEYS.delete(lk);
+  JD_WORKFLOW_IN_FLIGHT_KEYS.delete(bk);
+  jdLog('jd_classify', { st: 'abort', r: String(reason || '').slice(0, 48), lk: lk.slice(0, 120) });
+}
+
+function jdIsListWorkflowActive() {
+  const bk = jdListBaseKey();
+  const lk = jdListPageKey();
+  if (!lk) return false;
+  return JD_WORKFLOW_IN_FLIGHT_KEYS.has(bk) || JD_FULLY_SCROLLED_LIST_KEYS.has(lk);
 }
 
 function jdPruneOpenedIdsMap() {
@@ -146,25 +195,36 @@ function jdGetLikelyJobsListScrollRoot() {
 
 function jdHasReachedBottomForCurrentList() {
   const root = jdGetLikelyJobsListScrollRoot();
-  if (root) {
-    const dist = root.scrollHeight - (root.scrollTop + root.clientHeight);
-    return dist <= JD_SCROLL_BOTTOM_EPSILON_PX;
-  }
-  try {
-    const de = document.documentElement;
-    const db = document.body;
-    const scrollTop = window.scrollY || de?.scrollTop || db?.scrollTop || 0;
-    const clientHeight = window.innerHeight || de?.clientHeight || 0;
-    const scrollHeight = Math.max(de?.scrollHeight || 0, db?.scrollHeight || 0);
-    return scrollHeight - (scrollTop + clientHeight) <= JD_SCROLL_BOTTOM_EPSILON_PX;
-  } catch (_) {
-    return false;
-  }
+  if (!root) return false;
+  const dist = root.scrollHeight - (root.scrollTop + root.clientHeight);
+  return dist <= JD_SCROLL_BOTTOM_EPSILON_PX;
+}
+
+/** Liste courte : tout le contenu tient sans barre de scroll. */
+function jdListHasNoScrollNeeded() {
+  const root = jdGetLikelyJobsListScrollRoot();
+  if (!root) return false;
+  return root.scrollHeight - root.clientHeight <= JD_SCROLL_BOTTOM_EPSILON_PX;
+}
+
+function jdNoteListScrollActivity() {
+  const lk = jdListPageKey();
+  if (!lk) return;
+  jdPruneSmallSet(JD_LIST_USER_SCROLLED_KEYS, 12);
+  JD_LIST_USER_SCROLLED_KEYS.add(lk);
+}
+
+/** Scroll utilisateur sur le panneau liste, ou liste non scrollable. */
+function jdHasUserScrolledCurrentList() {
+  const lk = jdListPageKey();
+  if (!lk) return false;
+  if (JD_LIST_USER_SCROLLED_KEYS.has(lk)) return true;
+  return jdListHasNoScrollNeeded();
 }
 
 function jdIsCurrentListFullyScrolled() {
   const lk = jdListPageKey();
-  if (!lk) return true;
+  if (!lk) return false;
   return JD_FULLY_SCROLLED_LIST_KEYS.has(lk);
 }
 
@@ -181,15 +241,58 @@ function jdMarkCurrentListFullyScrolled(reason = '') {
 let __jdScrollRootHooked = null;
 let __jdScrollEndTimer = null;
 const JD_SCROLL_END_MS = 280;
+/** Une fois par élément scroll racine : sonder après branchement tardif (évite reload si SPA restaure le scroll avant nos listeners). */
+const jdScrollHookProbeTimers = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
+
+/**
+ * LinkedIn monte souvent la liste après nos scripts : les scroll ont lieu avant addEventListener.
+ * Si la liste est déjà en bas avec une position scrollée (scrollTop > 0), on considère le scroll « vu ».
+ * Si liste courte sans scroll (jdListHasNoScrollNeeded), jdHasUserScrolledCurrentList couvre déjà ce cas.
+ */
+function jdTryKickWorkflowAfterScrollHook(reason = '') {
+  try {
+    if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
+    mergeSeenClientJobsFromDom();
+    if (!jdHasReachedBottomForCurrentList()) return;
+    const root = jdGetLikelyJobsListScrollRoot();
+    if (!root) return;
+    const overflow = root.scrollHeight - root.clientHeight;
+    const needsScroll = overflow > JD_SCROLL_BOTTOM_EPSILON_PX;
+    const st = Number(root.scrollTop) || 0;
+    if (needsScroll && st <= 1) return;
+    jdNoteListScrollActivity();
+    jdOnListScrollFinished();
+    if (reason && typeof jdLog === 'function') {
+      jdLog('jd_boot', { r: String(reason || '').slice(0, 48), st: Math.round(st), ov: Math.round(overflow) });
+    }
+  } catch (_) {}
+}
+
+function jdScheduleKickAfterScrollHook(root, reason = '') {
+  if (!root) return;
+  const scheduleDelayed = () => {
+    try {
+      jdTryKickWorkflowAfterScrollHook(reason);
+    } catch (_) {}
+  };
+  requestAnimationFrame(() => requestAnimationFrame(scheduleDelayed));
+  if (!jdScrollHookProbeTimers) return;
+  const prev = jdScrollHookProbeTimers.get(root);
+  if (prev) clearTimeout(prev);
+  const t = setTimeout(scheduleDelayed, 850);
+  jdScrollHookProbeTimers.set(root, t);
+}
 
 /** Scroll terminé + bas de liste → badges puis clics. */
 function jdOnListScrollFinished() {
   mergeSeenClientJobsFromDom();
+  if (!jdHasUserScrolledCurrentList()) return;
   if (!jdHasReachedBottomForCurrentList()) return;
   jdTryStartListWorkflow('scroll-finished');
 }
 
 function jdScheduleScrollFinishedCheck() {
+  jdNoteListScrollActivity();
   if (__jdScrollEndTimer) clearTimeout(__jdScrollEndTimer);
   __jdScrollEndTimer = setTimeout(() => {
     __jdScrollEndTimer = null;
@@ -198,34 +301,60 @@ function jdScheduleScrollFinishedCheck() {
 }
 
 /** Le scroll de la liste LinkedIn ne remonte pas à document : écouter le panneau liste. */
-function jdEnsureListScrollRootListener() {
+function jdEnsureListScrollRootListener(hookReason = '') {
   const root = jdGetLikelyJobsListScrollRoot();
   if (!root) return null;
+  const newlyHooked = __jdScrollRootHooked !== root;
   if (__jdScrollRootHooked === root) return root;
   __jdScrollRootHooked = root;
   try {
     root.addEventListener('scroll', jdScheduleScrollFinishedCheck, { passive: true });
-    root.addEventListener('scrollend', jdOnListScrollFinished, { passive: true });
+    root.addEventListener(
+      'scrollend',
+      () => {
+        jdNoteListScrollActivity();
+        jdOnListScrollFinished();
+      },
+      { passive: true }
+    );
   } catch (_) {
     try {
       root.addEventListener('scroll', jdScheduleScrollFinishedCheck, { passive: true });
     } catch (_) {}
   }
+  if (newlyHooked) jdScheduleKickAfterScrollHook(root, hookReason || 'scroll-hook');
   return root;
 }
 
-/** Démarre le workflow (badges → clics Client). Idempotent : pnListWorkflowRunning bloque les doublons. */
+/** Démarre le workflow (badges → clics Client), une fois par page après scroll complet.
+ *  - JD_FULLY_SCROLLED_LIST_KEYS  : gate par page complète (lk avec start) → page 2, 3... peuvent passer
+ *  - JD_WORKFLOW_IN_FLIGHT_KEYS   : verrou pendant le classify (bk sans start) → évite doublons pendant scroll
+ */
 function jdTryStartListWorkflow(reason = '') {
+  if (!jdHasUserScrolledCurrentList()) return false;
   if (!jdHasReachedBottomForCurrentList()) return false;
-  jdMarkCurrentListFullyScrolled(reason);
+  const lk = jdListPageKey();
+  const bk = jdListBaseKey();
+  if (!lk) return false;
+  if (JD_FULLY_SCROLLED_LIST_KEYS.has(lk)) return false;
+  if (JD_WORKFLOW_IN_FLIGHT_KEYS.has(bk)) return false;
   if (typeof window.pnRunListWorkflowAfterFullScroll !== 'function') {
     jdLog('jd_fail', { m: 'no_workflow_fn', r: String(reason || '').slice(0, 48) });
     return false;
   }
+  JD_WORKFLOW_IN_FLIGHT_KEYS.add(bk);
   jdLog('jd_wf', { r: String(reason || '').slice(0, 48) });
-  void window.pnRunListWorkflowAfterFullScroll(reason);
+  void window.pnRunListWorkflowAfterFullScroll(reason).finally(() => {
+    JD_WORKFLOW_IN_FLIGHT_KEYS.delete(bk);
+  });
   return true;
 }
+
+try {
+  window.jdMarkCurrentListFullyScrolled = jdMarkCurrentListFullyScrolled;
+  window.jdAbortListWorkflowGate = jdAbortListWorkflowGate;
+  window.jdIsListWorkflowActive = jdIsListWorkflowActive;
+} catch (_) {}
 
 function jdLogAwaitFullScroll(reason = '') {
   const now = Date.now();
@@ -270,6 +399,7 @@ function mergeSeenClientJobsFromDom() {
     // Réinitialise uniquement le gate de scroll sur la destination (force un re-scroll)
     // mais conserve les sets seen/opened pour éviter de re-cliquer des jobs déjà traités.
     jdClearListGatingState(lk);
+    __jdScrollRootHooked = null;
     listKeyChanged = true;
   }
   if (!JD_SEEN_CLIENT_IDS_BY_LIST_KEY.has(lk)) {
@@ -915,7 +1045,7 @@ function debounce(fn, ms) {
 }
 
 const debouncedAutoOpenClientJobs = debounce(() => {
-  jdEnsureListScrollRootListener();
+  jdEnsureListScrollRootListener('doc-scroll');
   jdScheduleScrollFinishedCheck();
   const now = Date.now();
   if (now - __jdLastScrollLogAt >= JD_SCROLL_LOG_MS) {
@@ -926,15 +1056,17 @@ const debouncedAutoOpenClientJobs = debounce(() => {
 }, 650);
 
 const debouncedAutoOpenOnMutation = debounce(() => {
-  jdEnsureListScrollRootListener();
-  if (jdHasReachedBottomForCurrentList()) jdOnListScrollFinished();
+  jdEnsureListScrollRootListener('mutation-dom');
 }, 850);
 
 function installPnHistoryAutoOpenListener() {
   if (window.__pnHistoryAutoOpenListener) return;
   window.__pnHistoryAutoOpenListener = true;
   const onPathChange = () => {
-    /* Nouvelle liste : le workflow repart après un scroll complet. */
+    mergeSeenClientJobsFromDom();
+    __jdScrollRootHooked = null;
+    jdEnsureListScrollRootListener('spa-nav');
+    jdTryKickWorkflowAfterScrollHook('spa-nav-sync');
   };
   try {
     const wrap = (name) => {
@@ -961,14 +1093,6 @@ function attachAutoOpenScrollListeners() {
     'scroll',
     () => {
       debouncedAutoOpenClientJobs();
-    },
-    { passive: true, capture: true }
-  );
-  document.addEventListener(
-    'scrollend',
-    () => {
-      jdEnsureListScrollRootListener();
-      jdOnListScrollFinished();
     },
     { passive: true, capture: true }
   );
@@ -1042,11 +1166,12 @@ function installAutoOpenVisibilityListener() {
     { capture: true }
   );
 
-  jdEnsureListScrollRootListener();
+  jdEnsureListScrollRootListener('init');
 
-  /** Liste courte : tout visible sans scroll. */
+  /** Liste courte (pas de scroll possible) : workflow après chargement DOM. */
   setTimeout(() => {
-    jdEnsureListScrollRootListener();
-    jdOnListScrollFinished();
+    jdEnsureListScrollRootListener('init-delay');
+    jdTryKickWorkflowAfterScrollHook('init-delay');
+    if (jdListHasNoScrollNeeded()) jdOnListScrollFinished();
   }, 3500);
 })();

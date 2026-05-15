@@ -31,8 +31,9 @@ function getBadgeHostElement(card) {
 
 /** Aligné sur le gate auto-open (jobdesk-autoopen.js). */
 function pnListAllowsClassificationNow() {
-  if (typeof jdIsCurrentListFullyScrolled !== 'function') return true;
-  return jdIsCurrentListFullyScrolled();
+  if (typeof window.jdIsListWorkflowActive === 'function') return window.jdIsListWorkflowActive();
+  if (typeof jdIsCurrentListFullyScrolled === 'function') return jdIsCurrentListFullyScrolled();
+  return true;
 }
 
 function sendClassifyBatchChunk(companyNames) {
@@ -49,10 +50,25 @@ function sendClassifyBatchChunk(companyNames) {
       clearTimeout(timer);
       resolve(value && typeof value === 'object' ? value : {});
     };
-    const timer = setTimeout(() => finish({}), PN_CLASSIFY_CHUNK_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      if (typeof jdLog === 'function') {
+        jdLog('jd_classify', {
+          st: 'timeout',
+          ms: PN_CLASSIFY_CHUNK_TIMEOUT_MS,
+          co: list.length
+        });
+      }
+      finish({});
+    }, PN_CLASSIFY_CHUNK_TIMEOUT_MS);
     try {
       chrome.runtime.sendMessage({ type: 'CLASSIFY_COMPANIES_BATCH', companyNames: list }, (res) => {
         if (chrome.runtime.lastError) {
+          if (typeof jdLog === 'function') {
+            jdLog('jd_classify', {
+              st: 'sw_err',
+              m: String(chrome.runtime.lastError.message || '').slice(0, 120)
+            });
+          }
           finish({});
           return;
         }
@@ -74,8 +90,13 @@ async function sendClassifyBatch(companyNames) {
   ];
   if (!list.length) return {};
   const out = {};
+  const totalChunks = Math.ceil(list.length / PN_CLASSIFY_CHUNK_SIZE);
   for (let i = 0; i < list.length; i += PN_CLASSIFY_CHUNK_SIZE) {
+    const chunkIdx = Math.floor(i / PN_CLASSIFY_CHUNK_SIZE) + 1;
     const chunk = list.slice(i, i + PN_CLASSIFY_CHUNK_SIZE);
+    if (typeof jdLog === 'function') {
+      jdLog('jd_classify', { st: 'chunk', n: chunkIdx, tot: totalChunks, co: chunk.length });
+    }
     const part = await sendClassifyBatchChunk(chunk);
     Object.assign(out, part);
   }
@@ -158,9 +179,9 @@ function pnIsLoadingStuckOnCard(card) {
 }
 
 async function runClassificationPass() {
-  if (!isClassificationTargetPage()) return;
-  if (!pnListAllowsClassificationNow()) return;
-  if (classificationPassRunning) return;
+  if (!isClassificationTargetPage()) return false;
+  if (!pnListAllowsClassificationNow()) return false;
+  if (classificationPassRunning) return false;
 
   const passStarted = performance.now();
   const cards = collectJobCards();
@@ -186,10 +207,11 @@ async function runClassificationPass() {
   }
 
   const companyNames = [...byCompany.keys()];
-  if (!companyNames.length) return;
+  if (!companyNames.length) return true;
 
   classificationPassRunning = true;
   pnSuppressClientClassifiedEvent = true;
+  let passOk = false;
   if (typeof jdLog === 'function') {
     jdLog('jd_classify', { st: 'start', co: companyNames.length });
   }
@@ -201,6 +223,9 @@ async function runClassificationPass() {
     }
 
     const types = await sendClassifyBatch(companyNames);
+    const missingTypes = companyNames.filter(
+      (n) => types[n] !== 'Client' && types[n] !== 'SS2I'
+    );
 
     for (const [name, cardList] of byCompany) {
       const type = types[name] === 'Client' || types[name] === 'SS2I' ? types[name] : null;
@@ -212,6 +237,10 @@ async function runClassificationPass() {
     const passMs = Math.round(performance.now() - passStarted);
     let cardCount = 0;
     for (const list of byCompany.values()) cardCount += list.length;
+    passOk = missingTypes.length === 0;
+    if (!passOk && typeof jdLog === 'function') {
+      jdLog('jd_classify', { st: 'partial', miss: missingTypes.length, co: companyNames.length });
+    }
     if (typeof jdLog === 'function') {
       jdLog('jd_classify', { st: 'done', co: companyNames.length, cards: cardCount, ms: passMs });
     }
@@ -226,16 +255,24 @@ async function runClassificationPass() {
       });
     }
   } finally {
+    let stillLoading = 0;
     for (const cardList of byCompany.values()) {
       for (const card of cardList) {
         if (card?.isConnected && card.hasAttribute(DATA_LOADING)) {
+          stillLoading += 1;
           applyClassificationToCard(card, null);
         }
+      }
+    }
+    if (!passOk || stillLoading > 0) {
+      if (typeof window.jdAbortListWorkflowGate === 'function') {
+        window.jdAbortListWorkflowGate(passOk ? 'loading_left' : 'classify_err');
       }
     }
     pnSuppressClientClassifiedEvent = false;
     classificationPassRunning = false;
   }
+  return passOk;
 }
 
 try {

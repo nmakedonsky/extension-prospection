@@ -24,21 +24,21 @@
     return clamp01(t) * 100;
   }
 
-  /** CA / salarié (k€ ou k$ — même unité que les extractions LLM) */
-  function normRevenuePerEmployee(kPerEmp) {
-    return normLinear(kPerEmp, 25, 400);
+  /** CA / salarié (€ ou $ par tête, unités pleines) */
+  function normRevenuePerEmployee(perEmp) {
+    return normLinear(perEmp, 25000, 400000);
   }
 
-  /** Résultat net / salarié (k par tête) */
-  function normNetIncomePerEmployee(kPerEmp) {
-    if (kPerEmp == null || !Number.isFinite(Number(kPerEmp))) return null;
-    return normLinear(kPerEmp, -80, 120);
+  /** Résultat net / salarié (€ ou $ par tête) */
+  function normNetIncomePerEmployee(perEmp) {
+    if (perEmp == null || !Number.isFinite(Number(perEmp))) return null;
+    return normLinear(perEmp, -80000, 120000);
   }
 
-  /** Free cash-flow / salarié (k par tête) */
-  function normFcfPerEmployee(kPerEmp) {
-    if (kPerEmp == null || !Number.isFinite(Number(kPerEmp))) return null;
-    return normLinear(kPerEmp, -60, 100);
+  /** Free cash-flow / salarié (€ ou $ par tête) */
+  function normFcfPerEmployee(perEmp) {
+    if (perEmp == null || !Number.isFinite(Number(perEmp))) return null;
+    return normLinear(perEmp, -60000, 100000);
   }
 
   /** Marge % (nette prioritaire dans l’appelant) */

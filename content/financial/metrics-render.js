@@ -175,23 +175,28 @@ function renderFinancialMetrics(list, response) {
         : 'lph-financial-card__value--n/a'
   );
   const rpe = f.revenue_per_employee;
+  const rpeScalar = pnFinancialScalar(rpe);
   appendMetricRow(
     list,
     'CA / sal.',
-    rpe == null ? '—' : `${Math.round(Number(rpe) * 10) / 10} k${moneySym}`,
-    rpe == null ? 'lph-financial-card__value--n/a' : Number(rpe) >= 120 ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--warn'
+    rpeScalar != null ? formatMoneyScaleAbsolute(rpe, reportingCurrency) : '—',
+    rpeScalar == null ? 'lph-financial-card__value--n/a' : rpeScalar >= 120000 ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--warn'
   );
+  const niPe = f.net_income_per_employee;
+  const niPeScalar = pnFinancialScalar(niPe);
   appendMetricRow(
     list,
     'RN / sal.',
-    f.net_income_per_employee == null ? '—' : `${Math.round(Number(f.net_income_per_employee) * 10) / 10} k${moneySym}`,
-    f.net_income_per_employee == null ? 'lph-financial-card__value--n/a' : 'lph-financial-card__value--ok'
+    niPeScalar != null ? formatMoneyScaleAbsolute(niPe, reportingCurrency) : '—',
+    niPeScalar == null ? 'lph-financial-card__value--n/a' : 'lph-financial-card__value--ok'
   );
+  const fcfPe = f.fcf_per_employee;
+  const fcfPeScalar = pnFinancialScalar(fcfPe);
   appendMetricRow(
     list,
     'FCF / sal.',
-    f.fcf_per_employee == null ? '—' : `${Math.round(Number(f.fcf_per_employee) * 10) / 10} k${moneySym}`,
-    f.fcf_per_employee == null ? 'lph-financial-card__value--n/a' : 'lph-financial-card__value--ok'
+    fcfPeScalar != null ? formatMoneyScaleAbsolute(fcfPe, reportingCurrency) : '—',
+    fcfPeScalar == null ? 'lph-financial-card__value--n/a' : 'lph-financial-card__value--ok'
   );
   appendMetricRow(
     list,
@@ -223,11 +228,13 @@ function renderFinancialMetrics(list, response) {
     s.last_funding_date || '—',
     s.last_funding_date ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a'
   );
+  const fundingAmt = s.last_funding_amount;
+  const fundingScalar = pnFinancialScalar(fundingAmt);
   appendMetricRow(
     list,
     'Montant',
-    s.last_funding_amount == null ? '—' : String(s.last_funding_amount),
-    s.last_funding_amount != null ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a'
+    fundingScalar != null ? formatMoneyScaleAbsolute(fundingAmt, reportingCurrency) : '—',
+    fundingScalar != null ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a'
   );
   appendMetricRow(list, 'Stage', s.funding_stage || '—', s.funding_stage ? 'lph-financial-card__value--ok' : 'lph-financial-card__value--n/a');
   appendMetricRow(

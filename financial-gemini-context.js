@@ -64,11 +64,11 @@ Référence nom pour les champs : "${String(companyName || '').replace(/"/g, '\\
 
 Étapes :
 1) Déduis quelle entreprise du monde réel correspond le mieux au contexte (homonymes, filiales : précise dans identification_notes).
-2) reporting_currency : **EUR** ou **USD** — la même devise pour tous les montants monétaires ci-dessous (société européenne dominante → EUR ; société US dominante cotée en USD → USD).
-3) **Convention unique (obligatoire)** : revenue, revenue_previous, market_cap, ebitda, net_income, operating_cash_flow, free_cash_flow = nombre exprimé **toujours en millions** de reporting_currency (pas d'unités pleines, pas de milliards « bruts » sans conversion). Exemples : CA annuel ~96,5 milliards → value **96500** ; ~130 milliards de dollars → **130000** ; résultat net ~1,4 milliard → **1400** ; PME ~120 millions → **120**. employees = effectif (ETP) récent, **nombre de têtes entier** (pas en millions).
-4) revenuePerEmployee = CA par employé **uniquement en milliers** de la même devise (k€ ou k$ par tête), typiquement ~50 à ~800 pour les grands groupes — jamais en unités pleines par tête (pas 600000) ; sinon null.
-5) net_income_per_employee et fcf_per_employee : **milliers par tête** (k€ ou k$ / salarié), typiquement ~5 à ~120 pour les grands groupes cotés — jamais en euros bruts par tête (pas 15000) ; jamais en M€/tête (pas 0.015). Si tu as net_income (millions) et employees : k€/tête = net_income × 1000 / employees (ex. 1400 M€ / 83 000 ≈ **16,9** k€/tête).
-6) Marges et taux de croissance en pourcentage (ex. 12 pour 12 %, 9.3 pour 9.3 %). Ratios (ex. net_debt_ebitda) en multiplicateur simple (ex. 1.5).
+2) reporting_currency : **EUR** ou **USD** — devise unique pour tous les montants monétaires (société européenne dominante → EUR ; société US cotée en USD → USD).
+3) **Convention unique (obligatoire)** : revenue, revenue_previous, market_cap, ebitda, net_income, operating_cash_flow, free_cash_flow, last_funding_amount = montant **en unités pleines** de reporting_currency (euros ou dollars entiers, pas de millions ni de milliards à convertir). Exemples : CA annuel ~4,79 Md$ → value **4790000000** ; ~96,5 Md€ → **96500000000** ; PME ~120 M€ → **120000000** ; résultat net ~1,3 Md$ → **1300000000**. Ne pas diviser ni multiplier par 1000 ou 1 000 000 : le nombre exact en € ou $.
+4) employees = effectif (ETP) récent, **nombre de têtes entier**.
+5) Marges et taux de croissance en pourcentage (ex. 12 pour 12 %, 9.3 pour 9.3 %). Ratios (ex. net_debt_ebitda) en multiplicateur simple (ex. 1.5).
+6) Ne renvoie pas revenuePerEmployee, net_income_per_employee ni fcf_per_employee (calculés côté application).
 7) Si tu ne peux pas estimer raisonnablement une métrique, mets null et une confidence basse sur ce champ.
 8) globalConfidence : ta confiance globale 0–100 sur l'ensemble de l'extraction.
 
@@ -87,15 +87,12 @@ Retourne UNIQUEMENT un JSON valide :
   "operating_cashflow_positive": {"value": true|false|null, "confidence": number, "url": "string|null"},
   "revenue_growth": {"value": number|null, "confidence": number, "url": "string|null"},
   "revenue_growth_3y_cagr": {"value": number|null, "confidence": number, "url": "string|null"},
-  "revenuePerEmployee": {"value": number|null, "confidence": number, "url": "string|null"},
   "net_margin": {"value": number|null, "confidence": number, "url": "string|null"},
   "gross_margin": {"value": number|null, "confidence": number, "url": "string|null"},
   "cash_to_total_assets": {"value": number|null, "confidence": number, "url": "string|null"},
   "net_debt_ebitda": {"value": number|null, "confidence": number, "url": "string|null"},
   "capex_to_revenue_pct": {"value": number|null, "confidence": number, "url": "string|null"},
   "rnd_to_revenue_pct": {"value": number|null, "confidence": number, "url": "string|null"},
-  "net_income_per_employee": {"value": number|null, "confidence": number, "url": "string|null"},
-  "fcf_per_employee": {"value": number|null, "confidence": number, "url": "string|null"},
   "free_cash_flow": {"value": number|null, "confidence": number, "url": "string|null"},
   "market_cap": {"value": number|null, "confidence": number, "url": "string|null"},
   "funding_detected": boolean,
