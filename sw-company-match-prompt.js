@@ -3,7 +3,7 @@
  * Validation du contexte avant pipeline / appels LLM.
  */
 
-const SW_MATCH_CONTEXT_VERSION = 1;
+const SW_MATCH_CONTEXT_VERSION = 3;
 
 function swIsValidLinkedinCompanyUrl(u) {
   const s = String(u || '').trim();
@@ -26,9 +26,7 @@ function swValidateMatchContext(ctx) {
   if (!ctx || typeof ctx !== 'object') {
     return { ok: false, missing: ['context'] };
   }
-  if (!swIsValidLinkedinCompanyUrl(ctx.companyLinkedinUrl)) {
-    missing.push('companyLinkedinUrl');
-  }
+  // URL LinkedIn optionnelle : si présente mais non validée (slug ≠ nom), on ne l’envoie pas à Gemini.
   const logo = String(ctx.logoUrl || '').trim();
   if (!logo || !/^https?:\/\//i.test(logo)) {
     missing.push('logoUrl');
@@ -37,22 +35,43 @@ function swValidateMatchContext(ctx) {
   if (jt.length < 2) {
     missing.push('jobTitle');
   }
+  const name = String(ctx.companyName || '').trim();
+  if (name.length < 2) {
+    missing.push('companyName');
+  }
   return { ok: missing.length === 0, missing };
 }
 
 function swBuildCompanyMatchContextBlock(companyName, ctx) {
   const c = ctx || {};
   const hasImg = !!(c.logoInlineData && c.logoInlineData.dataBase64 && c.logoInlineData.mimeType);
+  const urlLine =
+    c.linkedinUrlValidated === true && swIsValidLinkedinCompanyUrl(c.companyLinkedinUrl)
+      ? c.companyLinkedinUrl
+      : '(non fournie — s’appuyer sur l’encart entreprise, le nom, le logo et le titre de l’offre)';
+  const insightBlock =
+    c.companyInsightAbout || c.companyInsightEmployees || c.companyInsightName
+      ? `--- Encart entreprise LinkedIn (bas du descriptif — source prioritaire) ---
+Nom dans l'encart : ${c.companyInsightName || '(identique au nom carte ou non extrait)'}
+Effectifs (indication LinkedIn) : ${c.companyInsightEmployees || '(non indiqué)'}
+Description / présentation (extrait, sans dérouler « voir plus ») :
+${c.companyInsightAbout || '(non extraite)'}
+--- Fin encart entreprise ---`
+      : '--- Encart entreprise (bas du descriptif) : non extrait — panneau détail peut-être incomplet ---';
   return `=== Contexte d'identification entreprise (matching — v${SW_MATCH_CONTEXT_VERSION}) ===
-Nom affiché (carte LinkedIn) : ${String(companyName || '').trim()}
+Nom affiché (carte liste LinkedIn) : ${String(companyName || '').trim()}
 Titre de l'offre : ${c.jobTitle || '(non fourni)'}
 Lieu (indication) : ${c.jobLocation || '(non fourni)'}
 URL de l'offre (si connue) : ${c.jobUrl || '(non fournie)'}
-URL page entreprise LinkedIn : ${c.companyLinkedinUrl || '(manquant)'}
+URL page entreprise LinkedIn : ${urlLine}
 URL source du logo : ${c.logoUrl || '(manquant)'}
 Texte alt du logo : ${c.logoAlt || '(non fourni)'}
 Image logo jointe : ${hasImg ? 'oui (voir 1re partie multimodale avant ce texte).' : 'non — s’appuyer sur les URLs et le nom.'}
 ${c.logoInlineSkipped ? "Note : l'image n'a pas pu être téléchargée (CORS/taille) ; utiliser le texte et les URLs." : ''}
+
+${insightBlock}
+
+Consigne matching : croiser nom carte, logo, URL LinkedIn et surtout l'encart entreprise (description + effectifs) pour désambiguïser homonymes et filiales avant d'estimer les chiffres.
 === Fin contexte identification ===`;
 }
 

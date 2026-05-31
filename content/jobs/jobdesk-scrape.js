@@ -313,6 +313,16 @@ function buildJobDetailsPayload(wrapper) {
   const { location, details } = splitJobMetadata(metadataItems, preferredLoc);
   const companyType = wrapper?.getAttribute?.(DATA_TYPE) || null;
   const descriptionHtml = descriptionEl?.innerHTML ? String(descriptionEl.innerHTML).trim() : '';
+  const resolvedJobUrl = jobUrl || detailJobUrl || cardPayload.jobUrl || '';
+  const companyInsight =
+    typeof extractJobDetailsCompanyInsightCard === 'function'
+      ? extractJobDetailsCompanyInsightCard(resolvedJobUrl)
+      : null;
+  const companyLinkedinUrl =
+    companyInsight?.companyLinkedinUrl ||
+    (typeof findCompanyUrlFromOpenJobDetailsPanel === 'function'
+      ? findCompanyUrlFromOpenJobDetailsPanel(resolvedJobUrl)
+      : null);
 
   if (!jobTitle && !linkedinJobId && !jobUrl) return null;
 
@@ -321,6 +331,7 @@ function buildJobDetailsPayload(wrapper) {
     linkedinJobId: linkedinJobId || null,
     companyName,
     companyType,
+    companyLinkedinUrl: companyLinkedinUrl || null,
     jobTitle: jobTitle || null,
     jobUrl: jobUrl || null,
     location: location || null,
@@ -329,10 +340,20 @@ function buildJobDetailsPayload(wrapper) {
     source: 'linkedin_jobs',
     linkedinData: {
       card: cardPayload.cardData || null,
+      companyLinkedinUrl: companyLinkedinUrl || null,
       details: {
         metadataItems,
         detailsText: details || null,
-        descriptionHtml: descriptionHtml || null
+        descriptionHtml: descriptionHtml || null,
+        companyInsight: companyInsight
+          ? {
+              companyName: companyInsight.companyName || null,
+              employeesHint: companyInsight.employeesHint || null,
+              aboutSnippet: companyInsight.aboutSnippet || null,
+              companyLinkedinUrl: companyInsight.companyLinkedinUrl || null,
+              insightSource: companyInsight.insightSource || null
+            }
+          : null
       }
     }
   };
@@ -499,14 +520,33 @@ function scheduleJobOfferScrape(wrapper, opts) {
           confirmComplete: waitForSupabaseComplete
         });
         const persistedComplete = !!saveRes?.persistedComplete;
+        const ci = payload.linkedinData?.details?.companyInsight;
         jdScLog({
           jid: String(payload.linkedinJobId || jid0),
           st: 'ok',
           o: origin,
           ms: Date.now() - started,
           dl: String(payload.descriptionText || '').length,
-          pc: persistedComplete ? 1 : 0
+          pc: persistedComplete ? 1 : 0,
+          co_url: payload.companyLinkedinUrl ? 1 : 0,
+          ci_src: ci?.insightSource || '',
+          ci_about: ci?.aboutSnippet ? String(ci.aboutSnippet).length : 0,
+          ci_emp: ci?.employeesHint ? 1 : 0
         });
+        if (
+          payload.companyType === 'Client' &&
+          payload.companyName &&
+          typeof prefetchFinancialDataForClient === 'function'
+        ) {
+          let card = wrapper;
+          if (!card?.isConnected && payload.linkedinJobId) {
+            const id = String(payload.linkedinJobId);
+            card =
+              document.querySelector(`[data-job-id="${id}"]`) ||
+              document.querySelector(`[data-occludable-job-id="${id}"]`);
+          }
+          prefetchFinancialDataForClient(card || document.body, payload.companyName);
+        }
         done({ state: 'ok', persistedComplete, saveOk: !!saveRes?.ok });
         return;
       }

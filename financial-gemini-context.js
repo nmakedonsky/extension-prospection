@@ -63,7 +63,7 @@ function buildFinancialExtractionInstructions(companyName) {
 Référence nom pour les champs : "${String(companyName || '').replace(/"/g, '\\"')}"
 
 Étapes :
-1) Déduis quelle entreprise du monde réel correspond le mieux au contexte (homonymes, filiales : précise dans identification_notes).
+1) Déduis quelle entreprise du monde réel correspond le mieux au contexte — en priorité l'encart entreprise LinkedIn (bas du descriptif : nom, effectifs, description) croisé avec le logo et l'URL /company/ si fournie (homonymes, filiales : précise dans identification_notes).
 2) reporting_currency : **EUR** ou **USD** — devise unique pour tous les montants monétaires (société européenne dominante → EUR ; société US cotée en USD → USD).
 3) **Convention unique (obligatoire)** : revenue, revenue_previous, market_cap, ebitda, net_income, operating_cash_flow, free_cash_flow, last_funding_amount = montant **en unités pleines** de reporting_currency (euros ou dollars entiers, pas de millions ni de milliards à convertir). Exemples : CA annuel ~4,79 Md$ → value **4790000000** ; ~96,5 Md€ → **96500000000** ; PME ~120 M€ → **120000000** ; résultat net ~1,3 Md$ → **1300000000**. Ne pas diviser ni multiplier par 1000 ou 1 000 000 : le nombre exact en € ou $.
 4) employees = effectif (ETP) récent, **nombre de têtes entier**.

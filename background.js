@@ -94,17 +94,9 @@ try {
 const SENDPILOT_API_BASE = 'https://api.sendpilot.ai/v1';
 
 /**
- * Vrai si aucune clé « principale » n’a encore été enregistrée (nouvelle install / stockage effacé).
- * Dans ce cas seulement, les valeurs de `local-config.js` (self.__PN_LOCAL_DEV_CONFIG) sont fusionnées.
- */
-function isConfigEffectivelyEmpty(c) {
-  if (!c || typeof c !== 'object') return true;
-  const keys = ['geminiApiKey', 'supabaseUrl', 'supabaseAnonKey', 'hubspotApiKey', 'sendPilotApiKey'];
-  return !keys.some((k) => c[k] != null && String(c[k]).trim() !== '');
-}
-
-/**
- * @returns {Promise<{ geminiApiKey?: string, supabaseUrl?: string, supabaseAnonKey?: string, hubspotApiKey?: string, hubspotRegion?: string, sendPilotApiKey?: string }>}
+ * Fusionne `local-config.js` dans chrome.storage :
+ * - preferLocalFile: true → le fichier prime sur le popup (dev)
+ * - sinon → complète uniquement les champs vides / manquants (recharge extension sans tout effacer)
  */
 async function loadConfig() {
   const r = await chrome.storage.local.get(STORAGE_KEY_CONFIG);
@@ -115,16 +107,27 @@ async function loadConfig() {
     typeof self !== 'undefined' && self.__PN_LOCAL_DEV_CONFIG && typeof self.__PN_LOCAL_DEV_CONFIG === 'object'
       ? self.__PN_LOCAL_DEV_CONFIG
       : null;
-  if (local && isConfigEffectivelyEmpty(c)) {
-    const merged = { ...c };
-    for (const [k, v] of Object.entries(local)) {
-      if (v != null && String(v).trim() !== '') merged[k] = v;
-    }
-    await chrome.storage.local.set({ [STORAGE_KEY_CONFIG]: merged });
-    return merged;
-  }
+  if (!local) return c;
 
-  return c;
+  const preferLocal = local.preferLocalFile === true;
+  const merged = { ...c };
+  let changed = false;
+  for (const [k, v] of Object.entries(local)) {
+    if (k === 'preferLocalFile') continue;
+    if (v == null || String(v).trim() === '') continue;
+    const stored = merged[k];
+    const storedEmpty = stored == null || String(stored).trim() === '';
+    if (preferLocal || storedEmpty) {
+      if (merged[k] !== v) {
+        merged[k] = v;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    await chrome.storage.local.set({ [STORAGE_KEY_CONFIG]: merged });
+  }
+  return merged;
 }
 
 /**

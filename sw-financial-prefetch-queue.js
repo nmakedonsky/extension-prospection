@@ -37,6 +37,12 @@ function swFinancialPrefetchSanitizeCompanyContext(ctx) {
     logoUrl: c.logoUrl,
     logoAlt: c.logoAlt,
     companyLinkedinUrl: c.companyLinkedinUrl,
+    linkedinUrlValidated: c.linkedinUrlValidated,
+    companyUrlSource: c.companyUrlSource,
+    companyInsightName: c.companyInsightName,
+    companyInsightAbout: c.companyInsightAbout,
+    companyInsightEmployees: c.companyInsightEmployees,
+    companyInsightSource: c.companyInsightSource,
     jobTitle: c.jobTitle,
     jobUrl: c.jobUrl,
     jobLocation: c.jobLocation,
@@ -82,7 +88,11 @@ function swFinancialPrefetchContextFingerprint(ctx) {
   const c = ctx && typeof ctx === 'object' ? ctx : {};
   const pick = (k) => String(c[k] || '').trim();
   return [
+    String(c.matchContextVersion || ''),
     pick('companyLinkedinUrl'),
+    pick('companyUrlSource'),
+    pick('companyInsightAbout'),
+    pick('companyInsightEmployees'),
     pick('jobUrl'),
     pick('jobTitle'),
     pick('jobLocation'),
@@ -114,6 +124,21 @@ async function swFinancialPrefetchRememberContextFingerprint(companyKey, fp) {
   } catch (_) {}
 }
 
+function swFinancialPrefetchContextLogFields(ctx) {
+  const c = ctx && typeof ctx === 'object' ? ctx : {};
+  const about = String(c.companyInsightAbout || '').trim();
+  return {
+    match_context_version: c.matchContextVersion ?? null,
+    company_url: c.companyLinkedinUrl || null,
+    url_source: c.companyUrlSource || null,
+    insight_name: c.companyInsightName || null,
+    insight_employees: c.companyInsightEmployees || null,
+    insight_about_len: about ? about.length : 0,
+    insight_about_preview: about ? about.slice(0, 120) : null,
+    has_insight: !!(about || c.companyInsightEmployees || c.companyInsightName)
+  };
+}
+
 function swFinancialPrefetchIsTransientErrorMessage(msg) {
   const s = String(msg || '').toLowerCase();
   return (
@@ -141,7 +166,11 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
     const fp = swFinancialPrefetchContextFingerprint(safeCtx);
     await swFinancialPrefetchRememberContextFingerprint(key, fp);
     void swFinancialPrefetchKick();
-    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'skip-cached' });
+    swPrefetchLog('financial_prefetch_enqueue', {
+      company_name: name,
+      mode: 'skip-cached',
+      ...swFinancialPrefetchContextLogFields(safeCtx)
+    });
     try {
       console.info('[Prospection SW] prefetch enqueue skip-cached:', name);
     } catch (_) {}
@@ -152,7 +181,11 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   const dupPending = q0.some((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key);
   if (dupPending) {
     void swFinancialPrefetchKick();
-    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'deduped-pending' });
+    swPrefetchLog('financial_prefetch_enqueue', {
+      company_name: name,
+      mode: 'deduped-pending',
+      ...swFinancialPrefetchContextLogFields(safeCtx)
+    });
     try {
       console.info('[Prospection SW] prefetch enqueue deduped-pending:', name);
     } catch (_) {}
@@ -162,7 +195,11 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   const recent = await swFinancialPrefetchIsContextFingerprintRecent(key, safeCtx);
   if (recent.hit) {
     void swFinancialPrefetchKick();
-    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'deduped-context' });
+    swPrefetchLog('financial_prefetch_enqueue', {
+      company_name: name,
+      mode: 'deduped-context',
+      ...swFinancialPrefetchContextLogFields(safeCtx)
+    });
     try {
       console.info('[Prospection SW] prefetch enqueue deduped-context:', name);
     } catch (_) {}
@@ -180,7 +217,11 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   const q = await swFinancialPrefetchLoadQueue();
   if (q.some((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key)) {
     void swFinancialPrefetchKick();
-    swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'deduped-pending' });
+    swPrefetchLog('financial_prefetch_enqueue', {
+      company_name: name,
+      mode: 'deduped-pending',
+      ...swFinancialPrefetchContextLogFields(safeCtx)
+    });
     try {
       console.info('[Prospection SW] prefetch enqueue deduped-pending:', name);
     } catch (_) {}
@@ -191,7 +232,11 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   await swFinancialPrefetchSaveQueue(q);
   await swFinancialPrefetchRememberContextFingerprint(key, recent.fp);
   void swFinancialPrefetchKick();
-  swPrefetchLog('financial_prefetch_enqueue', { company_name: name, mode: 'enqueued' });
+  swPrefetchLog('financial_prefetch_enqueue', {
+    company_name: name,
+    mode: 'enqueued',
+    ...swFinancialPrefetchContextLogFields(safeCtx)
+  });
   try {
     console.info('[Prospection SW] prefetch enqueue enqueued:', name);
   } catch (_) {}

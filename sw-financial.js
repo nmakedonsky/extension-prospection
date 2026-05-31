@@ -83,6 +83,10 @@ function swSanitizeFinancialContextForCache(ctx) {
     jobTitle: ctx.jobTitle ?? null,
     jobUrl: ctx.jobUrl ?? null,
     jobLocation: ctx.jobLocation ?? null,
+    companyInsightName: ctx.companyInsightName ?? null,
+    companyInsightAbout: ctx.companyInsightAbout ?? null,
+    companyInsightEmployees: ctx.companyInsightEmployees ?? null,
+    companyInsightSource: ctx.companyInsightSource ?? null,
     logoInlineSkipped: !!ctx.logoInlineSkipped
   };
 }

@@ -3,7 +3,7 @@
  * Doit être chargé après company-dock.js (utilise getJobInfoFromWrapper).
  */
 
-const MATCH_CONTEXT_VERSION = 1;
+const MATCH_CONTEXT_VERSION = 3;
 const MATCH_ENSURE_MAX_ATTEMPTS = 6;
 const MATCH_RETRY_DELAY_MS = 380;
 const LOGO_FETCH_MAX_ATTEMPTS = 3;
@@ -39,30 +39,84 @@ function pnNormalizeCompanyHref(href) {
     if (!u.hostname.toLowerCase().endsWith('linkedin.com')) return null;
     if (!/\/company\//i.test(u.pathname)) return null;
     u.hash = '';
+    u.search = '';
+    let path = u.pathname.replace(/\/life\/?$/i, '');
+    if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
+    u.pathname = path || u.pathname;
     return u.toString();
   } catch {
     return null;
   }
 }
 
+/** Slug LinkedIn depuis /company/{slug}/… */
+function pnCompanySlugFromUrl(url) {
+  try {
+    const path = new URL(url, 'https://www.linkedin.com').pathname;
+    const m = path.match(/\/company\/([^/?#]+)/i);
+    if (!m) return '';
+    return decodeURIComponent(m[1]).replace(/-/g, ' ').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function pnNormalizeNameForMatch(name) {
+  return String(name || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function pnNameTokens(name) {
+  const stop = new Set(['sa', 'sas', 'sarl', 'gmbh', 'inc', 'ltd', 'llc', 'group', 'groupe', 'the', 'and', 'de', 'la', 'le', 'les']);
+  return pnNormalizeNameForMatch(name)
+    .split(/\s+/)
+    .filter((t) => t.length >= 2 && !stop.has(t));
+}
+
 /**
- * Premier lien /company/ valide dans un sous-arbre (tous les candidats, pas seulement le premier).
+ * L’URL /company/{slug} correspond-elle au nom affiché sur la carte ?
  */
-function findCompanyUrlInRoot(root) {
+function pnUrlMatchesCompanyName(url, companyName) {
+  if (!pnIsValidLinkedinCompanyUrl(url) || !pnTrim(companyName)) return false;
+  const slug = pnCompanySlugFromUrl(url);
+  const nameNorm = pnNormalizeNameForMatch(companyName);
+  const slugNorm = pnNormalizeNameForMatch(slug);
+  if (!slugNorm || !nameNorm) return false;
+  if (slugNorm.includes(nameNorm) || nameNorm.includes(slugNorm)) return true;
+  const nameTokens = pnNameTokens(companyName);
+  const slugTokens = pnNameTokens(slug);
+  if (!nameTokens.length || !slugTokens.length) return false;
+  const overlap = nameTokens.filter((t) =>
+    slugTokens.some((st) => st === t || st.startsWith(t) || t.startsWith(st))
+  );
+  if (overlap.length >= 1 && nameTokens.length <= 2) return true;
+  if (overlap.length >= 1 && nameTokens[0].length >= 4) {
+    if (slugTokens.some((st) => st.startsWith(nameTokens[0]) || nameTokens[0].startsWith(st))) {
+      return true;
+    }
+  }
+  return overlap.length >= Math.max(1, Math.ceil(nameTokens.length * 0.5));
+}
+
+/** Premier lien /company/ dans un sous-arbre (sans validation slug). */
+function findFirstCompanyUrlInRoot(root) {
   if (!root?.querySelectorAll) return null;
-  const anchors = root.querySelectorAll('a[href*="company"]');
-  for (const a of anchors) {
-    const n = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
-    if (n) return n;
+  for (const a of root.querySelectorAll('a[href*="/company/"]')) {
+    const u = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
+    if (u) return u;
   }
   return null;
 }
 
 /**
- * Sur jobs/search-results, le lien société est souvent uniquement dans le panneau détail (droite),
- * pas dans la carte liste — on complète depuis le détail ou la colonne droite.
+ * Panneau détail : premier lien société si l’offre correspond (repli sans validation slug).
  */
-function findCompanyUrlFromJobDetailsPane(wrapper) {
+function findCompanyUrlFromJobDetailsPaneFallback(wrapper, jobUrl) {
   const detailSelectors = [
     '[componentkey*="JobDetails"]',
     '.jobs-search-two-pane__details',
@@ -73,26 +127,459 @@ function findCompanyUrlFromJobDetailsPane(wrapper) {
   ];
   for (const sel of detailSelectors) {
     try {
-      const roots = document.querySelectorAll(sel);
-      for (const root of roots) {
-        if (isNodeInJobDetailsComposed && !isNodeInJobDetailsComposed(root)) continue;
-        const u = findCompanyUrlInRoot(root);
+      for (const root of document.querySelectorAll(sel)) {
+        if (!pnJobDetailsPaneMatchesJob(root, jobUrl)) continue;
+        const u = findFirstCompanyUrlInRoot(root);
         if (u) return u;
       }
     } catch (_) {}
   }
+  return null;
+}
 
-  const vw = window.innerWidth || 1200;
-  const split = vw * 0.42;
-  const all = document.querySelectorAll('a[href*="company"]');
-  for (const a of all) {
-    const r = a.getBoundingClientRect?.();
-    if (!r || r.width < 1 || r.height < 1) continue;
-    if (r.left < split) continue;
-    const n = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
-    if (n) return n;
+function pnFindCompanyElementInWrapper(wrapper) {
+  if (typeof findCompanyElementInCard === 'function') {
+    const el = findCompanyElementInCard(wrapper);
+    if (el) return el;
+  }
+  if (typeof findCompanyElementInCardDock === 'function') {
+    return findCompanyElementInCardDock(wrapper);
   }
   return null;
+}
+
+/** URL société depuis le même élément DOM que le nom (lien /company/ de la carte). */
+function findCompanyUrlFromCompanyElement(wrapper, companyName) {
+  const el = pnFindCompanyElementInWrapper(wrapper);
+  if (!el) return null;
+  const candidates = [];
+  if (el.tagName === 'A') candidates.push(el);
+  const parentA = el.closest?.('a[href*="/company/"]');
+  if (parentA) candidates.push(parentA);
+  el.querySelectorAll?.('a[href*="/company/"]').forEach((a) => candidates.push(a));
+  for (const a of candidates) {
+    const u = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
+    if (u && pnUrlMatchesCompanyName(u, companyName)) return u;
+  }
+  return null;
+}
+
+/**
+ * Liens /company/ dans un sous-arbre dont le slug correspond au nom (pas le premier lien trouvé).
+ */
+function findCompanyUrlInRootMatching(root, companyName) {
+  if (!root?.querySelectorAll || !companyName) return null;
+  let best = null;
+  let bestScore = 0;
+  for (const a of root.querySelectorAll('a[href*="/company/"]')) {
+    const u = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
+    if (!u || !pnUrlMatchesCompanyName(u, companyName)) continue;
+    const textNorm = pnNormalizeNameForMatch(a.textContent);
+    const nameNorm = pnNormalizeNameForMatch(companyName);
+    let score = 2;
+    if (textNorm && (textNorm.includes(nameNorm) || nameNorm.includes(textNorm))) score = 5;
+    if (score > bestScore) {
+      bestScore = score;
+      best = u;
+    }
+  }
+  return best;
+}
+
+/** URL offre courante (carte ou `currentJobId` dans la barre d’adresse). */
+function pnResolveJobUrlFromWrapper(wrapper) {
+  const jobInfo =
+    wrapper && typeof getJobInfoFromWrapper === 'function'
+      ? getJobInfoFromWrapper(wrapper)
+      : { jobUrl: '' };
+  let jobUrl = pnTrim(jobInfo.jobUrl);
+  if (jobUrl) return jobUrl;
+  try {
+    const u = new URL(location.href);
+    const id = u.searchParams.get('currentJobId');
+    if (id) return `https://www.linkedin.com/jobs/view/${id}/`;
+  } catch (_) {}
+  return '';
+}
+
+/** Panneau détail job ouvert (après clic liste) — source la plus fiable pour l’URL société. */
+function pnGetOpenJobDetailsPanel() {
+  const selectors = [
+    '.jobs-search__job-details--container',
+    '[class*="jobs-search__job-details"]',
+    '[class*="job-details-jobs-unified-top-card"]',
+    '[class*="scaffold-layout__detail"]',
+    '.jobs-unified-top-card',
+    '[componentkey*="JobDetails"]'
+  ];
+  for (const sel of selectors) {
+    try {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    } catch (_) {}
+  }
+  return null;
+}
+
+/**
+ * Lien /company/ en tête du descriptif (ou encart entreprise en bas) — ex. DGSE → /company/dgse/life?lipi=…
+ * Normalisé en https://www.linkedin.com/company/dgse (sans tracking).
+ */
+function findCompanyUrlFromOpenJobDetailsPanel(jobUrl) {
+  const panel = pnGetOpenJobDetailsPanel();
+  if (!panel) return null;
+  if (jobUrl && !pnJobDetailsPaneMatchesJob(panel, jobUrl)) return null;
+
+  const topSelectors = [
+    '.job-details-jobs-unified-top-card__company-name a[href*="/company/"]',
+    '[class*="job-details-jobs-unified-top-card__company-name"] a[href*="/company/"]',
+    '.jobs-unified-top-card__company-name a[href*="/company/"]',
+    '[class*="jobs-unified-top-card__company-name"] a[href*="/company/"]',
+    '.job-details-jobs-unified-top-card__company-name',
+    '[class*="job-details-jobs-unified-top-card__company-name"]',
+    '.jobs-unified-top-card__company-name',
+    '[class*="jobs-unified-top-card__company-name"]'
+  ];
+  for (const sel of topSelectors) {
+    const el = panel.querySelector(sel);
+    if (!el) continue;
+    const anchor =
+      el.tagName === 'A' ? el : el.querySelector?.('a[href*="/company/"]') || el.closest?.('a[href*="/company/"]');
+    const u = pnNormalizeCompanyHref(anchor?.getAttribute?.('href') || anchor?.href || '');
+    if (u) return u;
+  }
+
+  for (const a of panel.querySelectorAll(
+    '[class*="job-insight"] a[href*="/company/"], [class*="company-module"] a[href*="/company/"], a[href*="/company/"]'
+  )) {
+    const u = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
+    if (u) return u;
+  }
+  return null;
+}
+
+function findLogoFromOpenJobDetailsPanel(jobUrl) {
+  const panel = pnGetOpenJobDetailsPanel();
+  if (!panel) return { url: null, img: null };
+  if (jobUrl && !pnJobDetailsPaneMatchesJob(panel, jobUrl)) return { url: null, img: null };
+  return findLogoInRoot(panel);
+}
+
+function pnIsLikelyTopJobHeaderBlock(el) {
+  if (!el) return false;
+  if (el.matches?.('.jobs-unified-top-card, [class*="jobs-unified-top-card"], [class*="job-details-jobs-unified-top-card"]')) {
+    if (el.querySelector('h1, [class*="job-title"]')) return true;
+  }
+  if (el.querySelector('h1[class*="job-title"], [class*="job-details-jobs-unified-top-card__job-title"]')) return true;
+  return false;
+}
+
+/** Boutons d’action LinkedIn (Partager, options…) — pas la description entreprise. */
+const PN_LINKEDIN_UI_NOISE =
+  /\b(partager|share|voir plus d.?options|see more options|signaler|report|enregistrer|save job|copier le lien|copy link)\b/i;
+
+function pnStripLinkedInUiChrome(text) {
+  return pnTrim(
+    String(text || '')
+      .replace(PN_LINKEDIN_UI_NOISE, ' ')
+      .replace(/\s+/g, ' ')
+  );
+}
+
+function pnElementFollowsDescription(descEl, el) {
+  if (!descEl || !el) return true;
+  return !!(descEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+function pnGetJobDescriptionElement(panel) {
+  if (!panel?.querySelector) return null;
+  const selectors = [
+    '.jobs-description-content__text',
+    '[class*="jobs-description-content__text"]',
+    '[class*="jobs-box__html-content"]',
+    '[class*="jobs-description-content"]',
+    '.jobs-description',
+    '[class*="jobs-description"]'
+  ];
+  for (const sel of selectors) {
+    const el = panel.querySelector(sel);
+    if (el && pnTrim(el.innerText).length > 80) return el;
+  }
+  return null;
+}
+
+function pnIsLikelyShareOrActionBar(el) {
+  if (!el) return false;
+  const t = pnTrim(el.innerText);
+  if (!PN_LINKEDIN_UI_NOISE.test(t)) return false;
+  const cleaned = pnStripLinkedInUiChrome(t);
+  // Barre d’actions : nom + Partager/Voir plus, sans vraie description.
+  return cleaned.length < 120 || cleaned.split(' ').length < 12;
+}
+
+function pnIsCompanyAboutSectionHeading(el) {
+  const t = pnTrim(el?.textContent || '');
+  return /^(à propos de l.?entreprise|about the company|about us|connaître l.?entreprise|who we are)$/i.test(t);
+}
+
+function pnFindCompanyAboutSectionRoot(panel, descEl) {
+  if (!panel?.querySelectorAll) return null;
+  for (const h of panel.querySelectorAll('h2, h3, h4, [class*="title"], [class*="subtitle"]')) {
+    if (!pnIsCompanyAboutSectionHeading(h)) continue;
+    if (!pnElementFollowsDescription(descEl, h)) continue;
+    const root =
+      h.closest?.(
+        'section, article, [class*="jobs-company"], [class*="company-module"], [class*="artdeco-card"], [class*="core-section-container"]'
+      ) || h.parentElement?.parentElement;
+    if (root && !pnIsLikelyTopJobHeaderBlock(root)) return root;
+  }
+  return null;
+}
+
+function pnHasCompanyLogoInRoot(root) {
+  if (!root?.querySelector) return false;
+  for (const img of root.querySelectorAll('img')) {
+    const url = resolveLogoUrlFromImg(img);
+    if (url && pnIsProbableCompanyLogoCdnUrl(url)) return true;
+  }
+  return false;
+}
+
+function pnClimbToInsightCardFromAnchor(anchor, descEl) {
+  if (!anchor) return null;
+  let el = anchor;
+  for (let depth = 0; depth < 10 && el; depth++) {
+    if (pnIsLikelyTopJobHeaderBlock(el)) return null;
+    if (descEl && !pnElementFollowsDescription(descEl, el)) return null;
+    const hasLogo = pnHasCompanyLogoInRoot(el);
+    const t = pnTrim(el.innerText);
+    if (hasLogo && t.length >= 40 && t.length <= 4000 && !pnIsLikelyShareOrActionBar(el)) {
+      return el;
+    }
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function pnCollectCompanyInsightCardCandidates(panel, descEl) {
+  const seen = new Set();
+  const out = [];
+
+  const push = (el, source) => {
+    if (!el || seen.has(el)) return;
+    seen.add(el);
+    out.push({ el, source });
+  };
+
+  push(pnFindCompanyAboutSectionRoot(panel, descEl), 'about_heading');
+
+  const classSelectors = [
+    '[class*="jobs-company"]',
+    '[class*="company-module"]',
+    '[class*="org-jobs-company"]',
+    '[class*="company-insights"]',
+    '[class*="about-the-company"]',
+    '[class*="about-us"]'
+  ];
+  for (const sel of classSelectors) {
+    try {
+      panel.querySelectorAll(sel).forEach((el) => {
+        if (pnIsLikelyTopJobHeaderBlock(el)) return;
+        if (descEl && !pnElementFollowsDescription(descEl, el)) return;
+        push(el, sel);
+      });
+    } catch (_) {}
+  }
+
+  for (const anchor of panel.querySelectorAll('a[href*="/company/"]')) {
+    if (pnIsLikelyTopJobHeaderBlock(anchor.closest?.('div, section, article') || anchor)) continue;
+    if (descEl && !pnElementFollowsDescription(descEl, anchor)) continue;
+    const card = pnClimbToInsightCardFromAnchor(anchor, descEl);
+    if (card) push(card, 'anchor_climb');
+  }
+
+  return out;
+}
+
+function pnScoreCompanyInsightCard(el, descEl, source) {
+  if (!el || pnIsLikelyTopJobHeaderBlock(el) || pnIsLikelyShareOrActionBar(el)) return -1;
+
+  const raw = pnTrim(el.innerText);
+  const cleaned = pnStripLinkedInUiChrome(raw);
+  if (cleaned.length < 30) return -1;
+
+  let score = Math.min(cleaned.length, 600);
+  if (source === 'about_heading') score += 800;
+  if (descEl && pnElementFollowsDescription(descEl, el)) score += 500;
+  if (pnHasCompanyLogoInRoot(el)) score += 200;
+  if (/employés|employees|salariés|collaborateurs|followers|abonnés|on LinkedIn/i.test(raw)) score += 220;
+  if (el.querySelector('[class*="inline-show-more-text"], [class*="show-more-less"]')) score += 180;
+
+  const sentences = cleaned.split(/[.!?…]\s+/).filter((s) => s.length > 20);
+  if (sentences.length >= 1) score += 80 + Math.min(sentences.length, 4) * 30;
+
+  if (PN_LINKEDIN_UI_NOISE.test(raw)) score -= 350;
+  if (cleaned.length < 80) score -= 120;
+  if (el.querySelector('button[aria-label*="Partager"], button[aria-label*="Share"]')) score -= 200;
+
+  return score;
+}
+
+function pnExtractEmployeesHintFromText(text) {
+  const raw = pnTrim(text);
+  const patterns = [
+    /([\d][\d\s.,]*\s*[-–]\s*[\d][\d\s.,]*)\s*(employés|employees|salariés|collaborateurs)/i,
+    /([\d][\d\s.,+kK]+)\s*(employés|employees|salariés|collaborateurs)/i,
+    /([\d][\d\s.,]*\s*[-–]\s*[\d][\d\s.,]*)\s*(followers|abonnés)/i
+  ];
+  for (const re of patterns) {
+    const m = raw.match(re);
+    if (m) return pnTrim(m[0]);
+  }
+  return null;
+}
+
+function pnExtractAboutFromInsightCard(card, insightName, employeesHint) {
+  if (!card?.querySelectorAll) return null;
+
+  const skip = new Set();
+  if (insightName) skip.add(pnTrim(insightName).toLowerCase());
+
+  const textSelectors = [
+    '[class*="inline-show-more-text"]',
+    '[class*="show-more-less-html"]',
+    '[class*="company-description"]',
+    '[class*="about-us"]',
+    '[class*="jobs-company"] p',
+    'p'
+  ];
+
+  for (const sel of textSelectors) {
+    for (const el of card.querySelectorAll(sel)) {
+      if (el.closest?.('button, [role="button"]')) continue;
+      let t = pnStripLinkedInUiChrome(el.innerText);
+      if (t.length < 25) continue;
+      if (skip.has(t.toLowerCase())) continue;
+      if (employeesHint && t.includes(employeesHint)) continue;
+      if (/^à propos de l.?entreprise$/i.test(t)) continue;
+      if (PN_LINKEDIN_UI_NOISE.test(t) && t.length < 100) continue;
+      if (t.split(' ').length >= 5) return t.slice(0, 900);
+    }
+  }
+
+  let about = pnStripLinkedInUiChrome(card.innerText);
+  if (insightName) about = about.replace(insightName, ' ').trim();
+  if (employeesHint) about = about.replace(employeesHint, ' ').trim();
+  about = about.replace(/^(à propos de l.?entreprise|about the company)[:\s]*/i, '').trim();
+  if (about.length >= 25 && !pnIsLikelyShareOrActionBar(card)) return about.slice(0, 900);
+  return null;
+}
+
+/**
+ * Encart « À propos de l'entreprise » en bas du descriptif (logo, nom, effectifs, ~2 lignes de description).
+ * Source prioritaire pour le matching financier Gemini.
+ */
+function extractJobDetailsCompanyInsightCard(jobUrl) {
+  const panel = pnGetOpenJobDetailsPanel();
+  if (!panel) return null;
+  if (jobUrl && !pnJobDetailsPaneMatchesJob(panel, jobUrl)) return null;
+
+  const descEl = pnGetJobDescriptionElement(panel);
+  const candidates = pnCollectCompanyInsightCardCandidates(panel, descEl);
+
+  let best = null;
+  let bestScore = 0;
+  let bestSource = '';
+  for (const { el, source } of candidates) {
+    const score = pnScoreCompanyInsightCard(el, descEl, source);
+    if (score > bestScore) {
+      bestScore = score;
+      best = el;
+      bestSource = source;
+    }
+  }
+  if (!best || bestScore < 80) return null;
+
+  const companyAnchor =
+    best.querySelector('a[href*="/company/"]') || best.closest?.('a[href*="/company/"]');
+  const companyLinkedinUrl = pnNormalizeCompanyHref(
+    companyAnchor?.getAttribute?.('href') || companyAnchor?.href || ''
+  );
+
+  let insightName = pnTrim(companyAnchor?.textContent || '');
+  if (!insightName || insightName.length < 2) {
+    const h = best.querySelector(
+      'h2, h3, h4, [class*="company-name"], [class*="entity-lockup__title"]'
+    );
+    insightName = pnTrim(h?.textContent || '');
+  }
+  insightName = pnStripLinkedInUiChrome(insightName);
+
+  let logoUrl = null;
+  let logoAlt = null;
+  const logoHit = findLogoInRoot(best);
+  if (logoHit.url) {
+    logoUrl = logoHit.url;
+    logoAlt = pnTrim(logoHit.img?.alt || '');
+  }
+
+  const fullText = pnTrim(best.innerText);
+  const employeesHint = pnExtractEmployeesHintFromText(fullText);
+  const aboutSnippet = pnExtractAboutFromInsightCard(best, insightName, employeesHint);
+
+  if (!aboutSnippet && !employeesHint && !companyLinkedinUrl) return null;
+
+  return {
+    companyLinkedinUrl: companyLinkedinUrl || null,
+    companyName: insightName || null,
+    logoUrl: logoUrl || null,
+    logoAlt: logoAlt || null,
+    employeesHint: employeesHint || null,
+    aboutSnippet: aboutSnippet || null,
+    insightSource: bestSource || null,
+    rawText: pnStripLinkedInUiChrome(fullText).slice(0, 1200)
+  };
+}
+
+/** Le panneau détail affiche-t-il la même offre (currentJobId) ? */
+function pnJobDetailsPaneMatchesJob(root, jobUrl) {
+  const jobId =
+    typeof getJobIdFromUrl === 'function' ? getJobIdFromUrl(jobUrl) : null;
+  if (!jobId || !root?.querySelectorAll) return true;
+  for (const a of root.querySelectorAll('a[href*="/jobs/"]')) {
+    const id = getJobIdFromUrl(a.getAttribute('href') || a.href);
+    if (id && id === jobId) return true;
+  }
+  return false;
+}
+
+/**
+ * Panneau détail uniquement si l’offre correspond — jamais de scan « moitié droite de l’écran ».
+ */
+function findCompanyUrlFromJobDetailsPane(wrapper, companyName, jobUrl) {
+  const detailSelectors = [
+    '[componentkey*="JobDetails"]',
+    '.jobs-search-two-pane__details',
+    '.scaffold-layout__detail',
+    '.jobs-details',
+    '[class*="jobs-search__job-details"]',
+    '.jobs-unified-top-card'
+  ];
+  for (const sel of detailSelectors) {
+    try {
+      for (const root of document.querySelectorAll(sel)) {
+        if (!pnJobDetailsPaneMatchesJob(root, jobUrl)) continue;
+        const u = findCompanyUrlInRootMatching(root, companyName);
+        if (u) return u;
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+/** @deprecated — ne plus utiliser sans validation nom/slug */
+function findCompanyUrlInRoot(root) {
+  return findCompanyUrlInRootMatching(root, '');
 }
 
 /** Rejette GIF 1×1 / fantômes LinkedIn (pas le vrai logo entreprise). */
@@ -178,9 +665,23 @@ function findLogoInRoot(root) {
 }
 
 /**
- * Logo souvent dans le panneau détail (droite) alors que la liste n’a qu’un placeholder.
+ * Logo depuis l’ancre société de la carte (même source que le nom).
  */
-function findLogoFromJobDetailsPane() {
+function findLogoFromCompanyElement(wrapper) {
+  const el = pnFindCompanyElementInWrapper(wrapper);
+  if (!el) return { url: null, img: null };
+  const anchor = el.tagName === 'A' ? el : el.closest?.('a[href*="/company/"]');
+  if (anchor) {
+    const hit = findLogoInRoot(anchor);
+    if (hit.url) return hit;
+  }
+  return findLogoInRoot(el);
+}
+
+/**
+ * Panneau détail : uniquement si l’offre correspond (pas de scan écran droit).
+ */
+function findLogoFromJobDetailsPane(wrapper, companyName, jobUrl) {
   const detailSelectors = [
     '[componentkey*="JobDetails"]',
     '.jobs-search-two-pane__details',
@@ -192,24 +693,18 @@ function findLogoFromJobDetailsPane() {
   for (const sel of detailSelectors) {
     try {
       for (const root of document.querySelectorAll(sel)) {
-        const hit = findLogoInRoot(root);
-        if (hit.url) return hit;
+        if (!pnJobDetailsPaneMatchesJob(root, jobUrl)) continue;
+        const companyUrl = findCompanyUrlInRootMatching(root, companyName);
+        if (!companyUrl) continue;
+        for (const a of root.querySelectorAll('a[href*="/company/"]')) {
+          const u = pnNormalizeCompanyHref(a.getAttribute('href') || a.href);
+          if (u !== companyUrl) continue;
+          const hit = findLogoInRoot(a);
+          if (hit.url) return hit;
+        }
       }
     } catch (_) {}
   }
-  const vw = window.innerWidth || 1200;
-  const split = vw * 0.42;
-  try {
-    for (const img of document.querySelectorAll(
-      'img[data-delayed-url*="media.licdn.com"], img[src*="media.licdn.com"]'
-    )) {
-      const r = img.getBoundingClientRect?.();
-      if (!r || r.width < 2 || r.height < 2) continue;
-      if (r.left < split) continue;
-      const url = resolveLogoUrlFromImg(img);
-      if (url && pnIsProbableCompanyLogoCdnUrl(url)) return { url, img };
-    }
-  } catch (_) {}
   return { url: null, img: null };
 }
 
@@ -236,39 +731,102 @@ function extractJobLocationHint(wrapper) {
  */
 function buildCompanyMatchContextSync(wrapper, companyName) {
   const name = pnTrim(companyName);
-  let logoHit = findLogoInRoot(wrapper);
-  if (!logoHit.url) {
-    logoHit = findLogoFromJobDetailsPane();
-  }
-  let companyLinkedinUrl =
-    findCompanyUrlInRoot(wrapper) ||
-    findCompanyUrlFromJobDetailsPane(wrapper);
+  const jobUrl = pnResolveJobUrlFromWrapper(wrapper);
   const jobInfo =
-    typeof getJobInfoFromWrapper === 'function'
+    wrapper && typeof getJobInfoFromWrapper === 'function'
       ? getJobInfoFromWrapper(wrapper)
       : { jobTitle: '', jobUrl: '' };
+
+  // 1) Encart entreprise en bas du descriptif (logo, nom, effectifs, description) — priorité matching financier.
+  const insight = extractJobDetailsCompanyInsightCard(jobUrl);
+
+  let companyLinkedinUrl = insight?.companyLinkedinUrl || null;
+  let linkedinUrlValidated = !!companyLinkedinUrl;
+  let urlSource = companyLinkedinUrl ? 'insight_card' : '';
+
+  // 2) Lien en-tête du panneau détail si l’encart n’a pas d’URL.
+  if (!companyLinkedinUrl) {
+    companyLinkedinUrl = findCompanyUrlFromOpenJobDetailsPanel(jobUrl);
+    linkedinUrlValidated = !!companyLinkedinUrl;
+    urlSource = companyLinkedinUrl ? 'detail_open' : '';
+  }
+
+  if (!companyLinkedinUrl) {
+    companyLinkedinUrl =
+      findCompanyUrlFromCompanyElement(wrapper, name) ||
+      findCompanyUrlInRootMatching(wrapper, name) ||
+      null;
+    if (!companyLinkedinUrl) {
+      companyLinkedinUrl = findCompanyUrlFromJobDetailsPane(wrapper, name, jobUrl);
+    }
+    linkedinUrlValidated = !!companyLinkedinUrl && pnUrlMatchesCompanyName(companyLinkedinUrl, name);
+    if (companyLinkedinUrl) urlSource = linkedinUrlValidated ? 'list_validated' : 'list_unvalidated';
+  }
+
+  let companyLinkedinUrlCandidate = companyLinkedinUrl;
+  if (!companyLinkedinUrlCandidate) {
+    companyLinkedinUrlCandidate =
+      findFirstCompanyUrlInRoot(wrapper) ||
+      findCompanyUrlFromJobDetailsPaneFallback(wrapper, jobUrl);
+  }
+
+  let logoHit = insight?.logoUrl ? { url: insight.logoUrl, img: null } : { url: null, img: null };
+  if (!logoHit.url) {
+    logoHit = findLogoFromOpenJobDetailsPanel(jobUrl);
+  }
+  if (!logoHit.url) {
+    logoHit = findLogoFromCompanyElement(wrapper);
+  }
+  if (!logoHit.url) {
+    logoHit = findLogoInRoot(wrapper);
+  }
+  if (!logoHit.url) {
+    logoHit = findLogoFromJobDetailsPane(wrapper, name, jobUrl);
+  }
+
+  let jobTitle = pnTrim(jobInfo.jobTitle);
+  if (!jobTitle) {
+    const panel = pnGetOpenJobDetailsPanel();
+    if (panel) {
+      jobTitle = pnTrim(
+        panel.querySelector?.('h1')?.textContent ||
+          panel.querySelector?.('[class*="job-title"]')?.textContent ||
+          ''
+      );
+    }
+  }
 
   const ctx = {
     matchContextVersion: MATCH_CONTEXT_VERSION,
     companyName: name,
     logoUrl: logoHit.url ? String(logoHit.url).trim() : null,
-    logoAlt: logoHit.img?.alt
-      ? String(logoHit.img.alt).trim()
-      : name
-        ? `Logo de ${name}`
-        : null,
-    companyLinkedinUrl,
-    jobTitle: pnTrim(jobInfo.jobTitle),
-    jobUrl: pnTrim(jobInfo.jobUrl),
+    logoAlt: insight?.logoAlt
+      ? String(insight.logoAlt).trim()
+      : logoHit.img?.alt
+        ? String(logoHit.img.alt).trim()
+        : name
+          ? `Logo de ${name}`
+          : null,
+    companyInsightName: insight?.companyName || null,
+    companyInsightAbout: insight?.aboutSnippet || null,
+    companyInsightEmployees: insight?.employeesHint || null,
+    companyInsightSource: insight?.insightSource || (insight ? 'detail_bottom_card' : null),
+    companyLinkedinUrl: linkedinUrlValidated ? companyLinkedinUrl : null,
+    companyLinkedinUrlCandidate: companyLinkedinUrlCandidate || null,
+    companyLinkedinSlug: companyLinkedinUrl ? pnCompanySlugFromUrl(companyLinkedinUrl) : null,
+    linkedinUrlValidated,
+    companyUrlSource: urlSource || null,
+    jobTitle,
+    jobUrl,
     jobLocation: extractJobLocationHint(wrapper) || null,
     logoInlineData: null,
     logoInlineSkipped: false
   };
 
   const missing = [];
-  if (!pnIsValidLinkedinCompanyUrl(ctx.companyLinkedinUrl)) missing.push('companyLinkedinUrl');
   if (!ctx.logoUrl || !/^https?:\/\//i.test(ctx.logoUrl)) missing.push('logoUrl');
   if (!ctx.jobTitle || ctx.jobTitle.length < 2) missing.push('jobTitle');
+  if (!ctx.companyName || ctx.companyName.length < 2) missing.push('companyName');
 
   return { context: ctx, missing };
 }
