@@ -200,7 +200,7 @@ function jdHasReachedBottomForCurrentList() {
   return dist <= JD_SCROLL_BOTTOM_EPSILON_PX;
 }
 
-/** Liste courte : tout le contenu tient sans barre de scroll. */
+/** Liste courte : tout le contenu tient sans barre de scroll (diagnostic interne). */
 function jdListHasNoScrollNeeded() {
   const root = jdGetLikelyJobsListScrollRoot();
   if (!root) return false;
@@ -214,12 +214,11 @@ function jdNoteListScrollActivity() {
   JD_LIST_USER_SCROLLED_KEYS.add(lk);
 }
 
-/** Scroll utilisateur sur le panneau liste, ou liste non scrollable. */
+/** Scroll utilisateur explicite sur le panneau liste (wheel / scroll / scrollend). */
 function jdHasUserScrolledCurrentList() {
   const lk = jdListPageKey();
   if (!lk) return false;
-  if (JD_LIST_USER_SCROLLED_KEYS.has(lk)) return true;
-  return jdListHasNoScrollNeeded();
+  return JD_LIST_USER_SCROLLED_KEYS.has(lk);
 }
 
 function jdIsCurrentListFullyScrolled() {
@@ -246,20 +245,25 @@ const jdScrollHookProbeTimers = typeof WeakMap !== 'undefined' ? new WeakMap() :
 
 /**
  * LinkedIn monte souvent la liste après nos scripts : les scroll ont lieu avant addEventListener.
- * Si la liste est déjà en bas avec une position scrollée (scrollTop > 0), on considère le scroll « vu ».
- * Si liste courte sans scroll (jdListHasNoScrollNeeded), jdHasUserScrolledCurrentList couvre déjà ce cas.
+ * Rattrapage uniquement si scrollTop > 0 et bas atteint (preuve d’un scroll réel avant le hook).
  */
 function jdTryKickWorkflowAfterScrollHook(reason = '') {
   try {
     if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
     mergeSeenClientJobsFromDom();
+    const lk = jdListPageKey();
+    if (!lk) return;
+    if (JD_LIST_USER_SCROLLED_KEYS.has(lk)) {
+      if (jdHasReachedBottomForCurrentList()) jdOnListScrollFinished();
+      return;
+    }
     if (!jdHasReachedBottomForCurrentList()) return;
     const root = jdGetLikelyJobsListScrollRoot();
     if (!root) return;
     const overflow = root.scrollHeight - root.clientHeight;
     const needsScroll = overflow > JD_SCROLL_BOTTOM_EPSILON_PX;
     const st = Number(root.scrollTop) || 0;
-    if (needsScroll && st <= 1) return;
+    if (!needsScroll || st <= 1) return;
     jdNoteListScrollActivity();
     jdOnListScrollFinished();
     if (reason && typeof jdLog === 'function') {
@@ -288,11 +292,18 @@ function jdOnListScrollFinished() {
   mergeSeenClientJobsFromDom();
   if (!jdHasUserScrolledCurrentList()) return;
   if (!jdHasReachedBottomForCurrentList()) return;
+  if (typeof collectJobCards === 'function' && collectJobCards().length < 1) {
+    setTimeout(() => {
+      if (jdHasUserScrolledCurrentList() && jdHasReachedBottomForCurrentList()) {
+        jdOnListScrollFinished();
+      }
+    }, 900);
+    return;
+  }
   jdTryStartListWorkflow('scroll-finished');
 }
 
 function jdScheduleScrollFinishedCheck() {
-  jdNoteListScrollActivity();
   if (__jdScrollEndTimer) clearTimeout(__jdScrollEndTimer);
   __jdScrollEndTimer = setTimeout(() => {
     __jdScrollEndTimer = null;
@@ -308,7 +319,14 @@ function jdEnsureListScrollRootListener(hookReason = '') {
   if (__jdScrollRootHooked === root) return root;
   __jdScrollRootHooked = root;
   try {
-    root.addEventListener('scroll', jdScheduleScrollFinishedCheck, { passive: true });
+    root.addEventListener(
+      'scroll',
+      () => {
+        jdNoteListScrollActivity();
+        jdScheduleScrollFinishedCheck();
+      },
+      { passive: true }
+    );
     root.addEventListener(
       'scrollend',
       () => {
@@ -317,9 +335,23 @@ function jdEnsureListScrollRootListener(hookReason = '') {
       },
       { passive: true }
     );
+    root.addEventListener(
+      'wheel',
+      () => {
+        jdNoteListScrollActivity();
+      },
+      { passive: true }
+    );
   } catch (_) {
     try {
-      root.addEventListener('scroll', jdScheduleScrollFinishedCheck, { passive: true });
+      root.addEventListener(
+        'scroll',
+        () => {
+          jdNoteListScrollActivity();
+          jdScheduleScrollFinishedCheck();
+        },
+        { passive: true }
+      );
     } catch (_) {}
   }
   if (newlyHooked) jdScheduleKickAfterScrollHook(root, hookReason || 'scroll-hook');
@@ -493,6 +525,37 @@ const clientJobOpenQueueSet = new Set();
 
 function randomDelayMsBetweenClientClicks() {
   return Math.round(800 + Math.random() * 1400);
+}
+
+/** Pause courte après un scrape complet (l’attente principale est dans scheduleJobOfferScrape). */
+function randomDelayMsAfterScrapeComplete() {
+  return Math.round(350 + Math.random() * 450);
+}
+
+async function jdAwaitJobScrapeAfterOpen(wrapper, jid, lk) {
+  const scrapeRes = await scheduleJobOfferScrape(wrapper, {
+    o: 'a',
+    jid: jid || undefined,
+    waitForSupabaseComplete: true,
+    requireCompanyInsight: true
+  });
+  if (scrapeRes?.state === 'ok' && scrapeRes?.persistedComplete) {
+    return scrapeRes;
+  }
+  if (jid && lk) {
+    jdGetOpenedIdsSetForListKey(lk).delete(jid);
+  }
+  if (wrapper) {
+    const k = dedupeKeyForCard(wrapper);
+    if (k) autoOpenedClientJobKeys.delete(k);
+  }
+  jdLog('jd_fail', {
+    jid: String(jid || ''),
+    m: 'scrape',
+    st: String(scrapeRes?.state || 'e'),
+    pc: scrapeRes?.persistedComplete ? 1 : 0
+  });
+  return scrapeRes;
 }
 
 function sleep(ms) {
@@ -890,21 +953,24 @@ async function tryAutoOpenNewVisibleClientJobs() {
         }
         const jid = pendingById.ids[i];
         const opened = syncUrlCurrentJobId(jid);
+        let scrapeRes = null;
         if (opened) {
           jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
-          batchOpened += 1;
-          scheduleJobOfferScrape(null, { o: 'a', jid });
           jdLog('jd_click', {
             jid,
             i,
             m: pendingById.ids.length,
             r: `${lastJdRunReason}|id-pass`
           });
+          scrapeRes = await jdAwaitJobScrapeAfterOpen(null, jid, pendingById.lk);
+          if (scrapeRes?.state === 'ok') {
+            batchOpened += 1;
+          }
         } else {
           jdLog('jd_fail', { jid, m: 'open-by-id', i, r: lastJdRunReason });
         }
-        if (opened && i < pendingById.ids.length - 1) {
-          const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsBetweenClientClicks());
+        if (opened && scrapeRes?.state === 'ok' && i < pendingById.ids.length - 1) {
+          const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsAfterScrapeComplete());
           if (!stillHere) {
             deferredAutoOpenWhileTabHidden = true;
             autoOpenRunQueued = true;
@@ -1000,13 +1066,12 @@ async function tryAutoOpenNewVisibleClientJobs() {
       const jid = resolveJobIdForOpen(wrapper) || '';
       const lk = jdListPageKey();
       const opened = performAutoOpenClientJobActions(wrapper);
+      let scrapeRes = null;
       if (opened) {
         saveJobCardSnapshot(wrapper);
         autoOpenedClientJobKeys.add(k);
         if (jid) jdGetOpenedIdsSetForListKey(lk).add(jid);
-        batchOpened += 1;
         dequeueClientJobOpenKey(k);
-        scheduleJobOfferScrape(wrapper, { o: 'a', jid: jid || undefined });
         jdLog('jd_click', {
           jid: String(jid),
           lk: jdListPageKey() || undefined,
@@ -1014,11 +1079,15 @@ async function tryAutoOpenNewVisibleClientJobs() {
           m: pendingToOpen.length,
           r: lastJdRunReason
         });
+        scrapeRes = await jdAwaitJobScrapeAfterOpen(wrapper, jid, lk);
+        if (scrapeRes?.state === 'ok') {
+          batchOpened += 1;
+        }
       } else {
         jdLog('jd_fail', { jid: String(jid), k: String(k).slice(0, 80), m: 'open', i, r: lastJdRunReason });
       }
-      if (opened && i < pendingToOpen.length - 1) {
-        const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsBetweenClientClicks());
+      if (opened && scrapeRes?.state === 'ok' && i < pendingToOpen.length - 1) {
+        const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsAfterScrapeComplete());
         if (!stillHere) {
           deferredAutoOpenWhileTabHidden = true;
           autoOpenRunQueued = true;
@@ -1167,11 +1236,4 @@ function installAutoOpenVisibilityListener() {
   );
 
   jdEnsureListScrollRootListener('init');
-
-  /** Liste courte (pas de scroll possible) : workflow après chargement DOM. */
-  setTimeout(() => {
-    jdEnsureListScrollRootListener('init-delay');
-    jdTryKickWorkflowAfterScrollHook('init-delay');
-    if (jdListHasNoScrollNeeded()) jdOnListScrollFinished();
-  }, 3500);
 })();

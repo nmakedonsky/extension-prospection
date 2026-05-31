@@ -152,7 +152,7 @@ function applyClassificationToCard(card, type) {
 
   const companyName = extractCompanyName(findCompanyElementInCard(card));
   if (type === 'Client') {
-    if (companyName) prefetchFinancialDataForClient(card, companyName);
+    // Prefetch financier uniquement après scrape job → companies.linkedin_company_url (pas au scroll).
     if (!pnSuppressClientClassifiedEvent) {
       try {
         document.dispatchEvent(new CustomEvent('pn-client-classified', { detail: { card } }));
@@ -187,9 +187,11 @@ async function runClassificationPass() {
   const cards = collectJobCards();
   /** @type {Map<string, HTMLElement[]>} */
   const byCompany = new Map();
+  let processedOnPage = 0;
 
   for (const card of cards) {
     if (card.hasAttribute(DATA_PROCESSED)) {
+      processedOnPage += 1;
       ensureBadgeOnProcessedCard(card);
       continue;
     }
@@ -207,7 +209,21 @@ async function runClassificationPass() {
   }
 
   const companyNames = [...byCompany.keys()];
-  if (!companyNames.length) return true;
+  if (!companyNames.length) {
+    if (!cards.length) {
+      if (typeof jdLog === 'function') {
+        jdLog('jd_classify', { st: 'skip_no_cards' });
+      }
+      return false;
+    }
+    if (processedOnPage > 0) {
+      return true;
+    }
+    if (typeof jdLog === 'function') {
+      jdLog('jd_classify', { st: 'skip_no_companies', cards: cards.length });
+    }
+    return false;
+  }
 
   classificationPassRunning = true;
   pnSuppressClientClassifiedEvent = true;

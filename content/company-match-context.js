@@ -741,14 +741,21 @@ function buildCompanyMatchContextSync(wrapper, companyName) {
   const insight = extractJobDetailsCompanyInsightCard(jobUrl);
 
   let companyLinkedinUrl = insight?.companyLinkedinUrl || null;
-  let linkedinUrlValidated = !!companyLinkedinUrl;
-  let urlSource = companyLinkedinUrl ? 'insight_card' : '';
+  let linkedinUrlValidated =
+    !!companyLinkedinUrl && pnUrlMatchesCompanyName(companyLinkedinUrl, name);
+  let urlSource = linkedinUrlValidated ? 'insight_card' : '';
+  if (companyLinkedinUrl && !linkedinUrlValidated) {
+    companyLinkedinUrl = null;
+  }
 
-  // 2) Lien en-tête du panneau détail si l’encart n’a pas d’URL.
+  // 2) Lien en-tête du panneau détail si l’encart n’a pas d’URL (slug validé).
   if (!companyLinkedinUrl) {
-    companyLinkedinUrl = findCompanyUrlFromOpenJobDetailsPanel(jobUrl);
-    linkedinUrlValidated = !!companyLinkedinUrl;
-    urlSource = companyLinkedinUrl ? 'detail_open' : '';
+    const detailUrl = findCompanyUrlFromOpenJobDetailsPanel(jobUrl);
+    if (detailUrl && pnUrlMatchesCompanyName(detailUrl, name)) {
+      companyLinkedinUrl = detailUrl;
+      linkedinUrlValidated = true;
+      urlSource = 'detail_open';
+    }
   }
 
   if (!companyLinkedinUrl) {

@@ -220,6 +220,62 @@ async function swHasFreshFinancialData(companyName) {
   return false;
 }
 
+function swFinancialContextHasRichInsight(ctx) {
+  const c = ctx && typeof ctx === 'object' ? ctx : {};
+  const about = String(c.companyInsightAbout || '').trim();
+  return about.length >= 80 || !!String(c.companyInsightEmployees || '').trim();
+}
+
+function swFinancialContextFromCacheEntry(entry) {
+  const raw = entry?.raw && typeof entry.raw === 'object' ? entry.raw : {};
+  return raw.companyContext && typeof raw.companyContext === 'object' ? raw.companyContext : null;
+}
+
+/**
+ * Re-prefetch si le nouveau contexte (encart entreprise) est plus riche que le cache existant.
+ */
+async function swShouldForceFinancialRefresh(companyName, newCtx) {
+  if (typeof swGetCanonicalCompanyLinkedinUrl === 'function') {
+    const canonical = await swGetCanonicalCompanyLinkedinUrl(companyName);
+    if (canonical) {
+      const cached = await swGetFinancialCache(companyName);
+      let oldCtx = swFinancialContextFromCacheEntry(cached);
+      if (!oldCtx) {
+        const supabaseFinancial = await swGetFinancialFromSupabase(companyName);
+        oldCtx = swFinancialContextFromCacheEntry(supabaseFinancial?.financial_pipeline_cache);
+      }
+      const oldUrl =
+        typeof swNormalizeLinkedinCompanyUrl === 'function'
+          ? swNormalizeLinkedinCompanyUrl(String(oldCtx?.companyLinkedinUrl || ''))
+          : String(oldCtx?.companyLinkedinUrl || '').trim();
+      if (!oldUrl || oldUrl !== canonical) return true;
+    }
+  }
+
+  if (!newCtx || typeof newCtx !== 'object') return false;
+  if (!swFinancialContextHasRichInsight(newCtx)) return false;
+
+  const cached = await swGetFinancialCache(companyName);
+  let oldCtx = swFinancialContextFromCacheEntry(cached);
+  if (!oldCtx) {
+    const supabaseFinancial = await swGetFinancialFromSupabase(companyName);
+    const payload = supabaseFinancial?.financial_pipeline_cache;
+    oldCtx = swFinancialContextFromCacheEntry(payload);
+  }
+  if (!oldCtx) return true;
+  if (!swFinancialContextHasRichInsight(oldCtx)) return true;
+
+  const newAbout = String(newCtx.companyInsightAbout || '').trim().length;
+  const oldAbout = String(oldCtx.companyInsightAbout || '').trim().length;
+  if (newAbout > oldAbout + 50) return true;
+
+  const newUrl = String(newCtx.companyLinkedinUrl || '').trim();
+  const oldUrl = String(oldCtx.companyLinkedinUrl || '').trim();
+  if (newUrl && newUrl !== oldUrl && newCtx.companyUrlSource === 'insight_card') return true;
+
+  return false;
+}
+
 function swHarmonizeUnifiedFinancials(unified) {
   if (!unified?.financials || typeof self.llmFinancialHarmonize !== 'function') return unified;
   return {
@@ -325,6 +381,10 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
         }
       };
     }
+  }
+
+  if (typeof swMergeCanonicalUrlIntoContext === 'function') {
+    companyContext = await swMergeCanonicalUrlIntoContext(companyName, companyContext);
   }
 
   const matchCheck = swValidateMatchContext(companyContext);

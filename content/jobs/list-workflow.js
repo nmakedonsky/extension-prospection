@@ -49,7 +49,7 @@ async function pnRunListWorkflowAfterFullScroll(reason = '') {
     if (typeof lastAutoOpenRunAt !== 'undefined') lastAutoOpenRunAt = Date.now();
 
     if (typeof tryAutoOpenNewVisibleClientJobs === 'function') {
-      await tryAutoOpenNewVisibleClientJobs();
+      requestAutoOpenRun('full-scroll-ready');
     }
   } finally {
     pnListWorkflowRunning = false;

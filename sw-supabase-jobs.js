@@ -61,9 +61,6 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
   }
 
   const detectedType = jobOffer?.companyType || (await getOrClassifyCompany(trimmedCompanyName));
-  if (detectedType) {
-    await upsertCompanyToSupabase(trimmedCompanyName, detectedType);
-  }
 
   const headers = {
     apikey: key,
@@ -85,6 +82,30 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       jobOffer?.stage === 'details' &&
       jobOffer?.detailsScrapedAt &&
       String(jobOffer?.descriptionText || '').trim().length > 0;
+
+    let linkedinPromote = null;
+    if (detailScrapeDone && typeof swEnsureCompanyLinkedinUrlFromJob === 'function') {
+      linkedinPromote = await swEnsureCompanyLinkedinUrlFromJob(jobOffer, detectedType);
+      if (linkedinPromote?.ok) {
+        try {
+          console.info(
+            '[Prospection BG] linkedin_company_url',
+            trimmedCompanyName,
+            linkedinPromote.mode,
+            linkedinPromote.canonicalUrl
+          );
+        } catch (_) {}
+      }
+    }
+
+    const companyRowHandled =
+      linkedinPromote?.ok &&
+      (linkedinPromote.mode === 'created' ||
+        linkedinPromote.mode === 'initialized' ||
+        linkedinPromote.mode === 'frozen');
+    if (detectedType && !companyRowHandled) {
+      await upsertCompanyToSupabase(trimmedCompanyName, detectedType);
+    }
 
     let needsRescrape;
     if (detailScrapeDone) {
@@ -121,7 +142,9 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
           body: JSON.stringify(payload)
         }
       );
-      if (patchRes.ok) return { ok: true, mode: 'patch' };
+      if (patchRes.ok) {
+        return { ok: true, mode: 'patch', linkedinPromote };
+      }
       const text = await patchRes.text();
       return { ok: false, error: `patch ${patchRes.status}: ${text.slice(0, 200)}` };
     }
@@ -131,7 +154,7 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       headers,
       body: JSON.stringify(payload)
     });
-    if (insertRes.ok) return { ok: true, mode: 'insert' };
+    if (insertRes.ok) return { ok: true, mode: 'insert', linkedinPromote };
     const insertText = await insertRes.text();
     if (swIsDuplicateConstraintError(insertText)) {
       const recoveredLookup = swBuildJobLookupClauses(jobOffer, payload);
@@ -145,7 +168,7 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
             body: JSON.stringify(payload)
           }
         );
-        if (retryPatchRes.ok) return { ok: true, mode: 'insert-duplicate-recovered' };
+        if (retryPatchRes.ok) return { ok: true, mode: 'insert-duplicate-recovered', linkedinPromote };
         const retryText = await retryPatchRes.text();
         return { ok: false, error: `patch-after-duplicate ${retryPatchRes.status}: ${retryText.slice(0, 200)}` };
       }

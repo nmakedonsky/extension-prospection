@@ -12,6 +12,7 @@ importScripts(
   'sw-company-summary.js',
   'sw-supabase-financial.js',
   'sw-supabase-jobs.js',
+  'sw-company-linkedin-url.js',
   'sw-tab-flush-buffers.js',
   'sw-financial.js',
   'sw-financial-prefetch-queue.js'

@@ -4,9 +4,12 @@
  */
 
 const JOB_SCRAPE_AFTER_OPEN_FIRST_DELAY_MS = 520;
-const JOB_SCRAPE_AFTER_OPEN_STEP_MS = 380;
-const JOB_SCRAPE_AFTER_OPEN_MAX_MS = 18000;
+const JOB_SCRAPE_AFTER_OPEN_STEP_MS = 420;
+const JOB_SCRAPE_AFTER_OPEN_MAX_MS = 32000;
 const JOB_SCRAPE_MIN_DESCRIPTION_LEN = 100;
+const JOB_SCRAPE_INSIGHT_MIN_ABOUT_LEN = 80;
+/** Deux polls stables consécutifs avec le même encart entreprise (évite texte partiel). */
+const JOB_SCRAPE_INSIGHT_STABLE_POLLS = 2;
 
 const JOB_DETAIL_PANEL_SELECTORS = [
   '.jobs-search__job-details--container',
@@ -318,11 +321,12 @@ function buildJobDetailsPayload(wrapper) {
     typeof extractJobDetailsCompanyInsightCard === 'function'
       ? extractJobDetailsCompanyInsightCard(resolvedJobUrl)
       : null;
-  const companyLinkedinUrl =
-    companyInsight?.companyLinkedinUrl ||
-    (typeof findCompanyUrlFromOpenJobDetailsPanel === 'function'
+  const insightUrl = companyInsight?.companyLinkedinUrl || null;
+  const headerUrl =
+    typeof findCompanyUrlFromOpenJobDetailsPanel === 'function'
       ? findCompanyUrlFromOpenJobDetailsPanel(resolvedJobUrl)
-      : null);
+      : null;
+  const companyLinkedinUrl = insightUrl || headerUrl || null;
 
   if (!jobTitle && !linkedinJobId && !jobUrl) return null;
 
@@ -377,7 +381,8 @@ function isElementVisible(el) {
  * @param {string} [expectedJid] - jid cible passé par l'auto-open ; si fourni et si le panel
  *   expose un jid différent, isReady = false jusqu'à correspondance.
  */
-function getJobDeskReadyState(payload, expectedJid) {
+function getJobDeskReadyState(payload, expectedJid, opts) {
+  const requireCompanyInsight = opts?.requireCompanyInsight !== false;
   const detailsPanel = getJobDetailsPanel();
   const metadataCount = Array.isArray(payload?.linkedinData?.details?.metadataItems)
     ? payload.linkedinData.details.metadataItems.length
@@ -385,6 +390,7 @@ function getJobDeskReadyState(payload, expectedJid) {
   const descriptionLength = String(payload?.descriptionText || '').trim().length;
   const hasTitle = String(payload?.jobTitle || '').trim().length > 0;
   const hasCompany = String(payload?.companyName || '').trim().length > 0;
+  const hasCompanyInsight = jdScrapeHasCompleteCompanyInsight(payload);
 
   // Vérification du jid panel vs jid attendu : diagnostic uniquement, ne bloque pas isReady.
   // En auto-open fire-and-forget, le panel prend > 520 ms pour afficher le nouveau job,
@@ -398,7 +404,9 @@ function getJobDeskReadyState(payload, expectedJid) {
       isElementVisible(detailsPanel) &&
       hasCompany &&
       hasTitle &&
-      descriptionLength >= JOB_SCRAPE_MIN_DESCRIPTION_LEN,
+      descriptionLength >= JOB_SCRAPE_MIN_DESCRIPTION_LEN &&
+      (!requireCompanyInsight || hasCompanyInsight),
+    hasCompanyInsight,
     jidMatches,
     descriptionLength,
     signature: JSON.stringify([
@@ -408,9 +416,72 @@ function getJobDeskReadyState(payload, expectedJid) {
       payload?.companyName || '',
       payload?.location || '',
       metadataCount,
-      descriptionLength
+      descriptionLength,
+      String(payload?.linkedinData?.details?.companyInsight?.companyLinkedinUrl || ''),
+      String(payload?.linkedinData?.details?.companyInsight?.aboutSnippet || '').length,
+      String(payload?.linkedinData?.details?.companyInsight?.employeesHint || '')
     ])
   };
+}
+
+/** Encart « À propos de l’entreprise » entièrement chargé (description + URL ou effectifs). */
+function jdScrapeHasCompleteCompanyInsight(payload) {
+  const ci = payload?.linkedinData?.details?.companyInsight;
+  if (!ci) return false;
+  const aboutLen = String(ci.aboutSnippet || '').trim().length;
+  const emp = String(ci.employeesHint || '').trim();
+  const url = String(ci.companyLinkedinUrl || '').trim();
+  if (aboutLen < JOB_SCRAPE_INSIGHT_MIN_ABOUT_LEN) return false;
+  if (!url && !emp) return false;
+  return true;
+}
+
+/** Scroll le panneau détail et développe « Voir plus » pour charger l’encart entreprise. */
+function jdRevealCompanyInsightCard() {
+  const panel = getJobDetailsPanel();
+  if (!panel) return;
+
+  const scrollRoots = [panel];
+  try {
+    panel.querySelectorAll('*').forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const st = window.getComputedStyle(el);
+      if (
+        (st.overflowY === 'auto' || st.overflowY === 'scroll' || st.overflowY === 'overlay') &&
+        el.scrollHeight - el.clientHeight > 48
+      ) {
+        scrollRoots.push(el);
+      }
+    });
+  } catch (_) {}
+
+  for (const el of scrollRoots) {
+    try {
+      el.scrollTop = el.scrollHeight;
+    } catch (_) {}
+  }
+
+  try {
+    panel.scrollIntoView({ block: 'end', behavior: 'auto' });
+  } catch (_) {}
+
+  try {
+    for (const btn of panel.querySelectorAll('button, [role="button"]')) {
+      const label = pnNormalizeText(
+        btn.getAttribute?.('aria-label') || btn.innerText || btn.textContent || ''
+      ).toLowerCase();
+      if (!/voir plus|show more|see more|afficher plus/i.test(label)) continue;
+      const scope =
+        btn.closest?.(
+          '[class*="jobs-company"], [class*="company-module"], [class*="about-the-company"], [class*="about-us"]'
+        ) || btn.closest?.('section, article');
+      if (!scope) continue;
+      if (scope.querySelector?.('[class*="jobs-description"], [class*="job-details-jobs-unified-top-card"]')) {
+        continue;
+      }
+      btn.click();
+    }
+  } catch (_) {}
 }
 
 function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
@@ -422,7 +493,10 @@ function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
     jobOffer.companyName || '',
     jobOffer.jobTitle || '',
     jobOffer.location || '',
-    jobOffer.descriptionText || ''
+    jobOffer.descriptionText || '',
+    jobOffer.linkedinData?.details?.companyInsight?.aboutSnippet || '',
+    jobOffer.linkedinData?.details?.companyInsight?.employeesHint || '',
+    jobOffer.linkedinData?.details?.companyInsight?.companyLinkedinUrl || ''
   ]);
   if (!confirmComplete && fingerprint === lastSavedJobFingerprint) {
     return Promise.resolve({ ok: true, persistedComplete: false, skippedDuplicateFingerprint: true });
@@ -457,6 +531,7 @@ function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
 function scheduleJobOfferScrape(wrapper, opts) {
   const origin = opts?.o === 'u' ? 'u' : 'a';
   const waitForSupabaseComplete = !!opts?.waitForSupabaseComplete;
+  const requireCompanyInsight = opts?.requireCompanyInsight !== false;
   const expectedJid = String(opts?.jid || '').trim();
   const card0 = buildJobCardPayload(wrapper);
   const jid0 = expectedJid || String(card0?.linkedinJobId || '');
@@ -471,6 +546,8 @@ function scheduleJobOfferScrape(wrapper, opts) {
     // flags one-shot pour éviter de spammer les logs de diagnostic
     let warnedJidMismatch = false;
     let warnedShortDesc = false;
+    let warnedMissingInsight = false;
+    let revealInsightEvery = 0;
 
     const done = (result) => {
       if (finished) return;
@@ -488,7 +565,36 @@ function scheduleJobOfferScrape(wrapper, opts) {
       const payload = buildJobDetailsPayload(wrapper);
       if (payload) bestPayload = payload;
 
-      const { isReady, jidMatches, descriptionLength, signature } = getJobDeskReadyState(payload, expectedJid);
+      if (
+        payload &&
+        String(payload.descriptionText || '').trim().length >= JOB_SCRAPE_MIN_DESCRIPTION_LEN &&
+        requireCompanyInsight &&
+        !jdScrapeHasCompleteCompanyInsight(payload)
+      ) {
+        revealInsightEvery += 1;
+        if (revealInsightEvery % 2 === 1) {
+          jdRevealCompanyInsightCard();
+        }
+      }
+
+      let { isReady, hasCompanyInsight, jidMatches, descriptionLength, signature } = getJobDeskReadyState(
+        payload,
+        expectedJid,
+        { requireCompanyInsight }
+      );
+      if (requireCompanyInsight && payload && !hasCompanyInsight && !warnedMissingInsight) {
+        const descOk = descriptionLength >= JOB_SCRAPE_MIN_DESCRIPTION_LEN;
+        if (descOk) {
+          warnedMissingInsight = true;
+          jdScLog({
+            jid: jid0,
+            st: 'w_ci',
+            o: origin,
+            ms: Date.now() - started,
+            dl: descriptionLength
+          });
+        }
+      }
 
       // Log one-shot si on attend que le bon job soit affiché
       if (!jidMatches && !warnedJidMismatch) {
@@ -515,7 +621,8 @@ function scheduleJobOfferScrape(wrapper, opts) {
         lastReadySignature = '';
       }
 
-      if (stableReadyCount >= 1 && payload) {
+      const requiredStablePolls = requireCompanyInsight ? JOB_SCRAPE_INSIGHT_STABLE_POLLS : 1;
+      if (stableReadyCount >= requiredStablePolls && payload) {
         const saveRes = await pnSaveJobOfferToBackground(payload, wrapper, {
           confirmComplete: waitForSupabaseComplete
         });
@@ -551,6 +658,21 @@ function scheduleJobOfferScrape(wrapper, opts) {
         return;
       }
       if (Date.now() - started >= JOB_SCRAPE_AFTER_OPEN_MAX_MS) {
+        const insightComplete = bestPayload && jdScrapeHasCompleteCompanyInsight(bestPayload);
+        if (requireCompanyInsight && !insightComplete) {
+          jdScLog({
+            jid: String((bestPayload && bestPayload.linkedinJobId) || jid0),
+            st: 'w_insight',
+            o: origin,
+            ms: Date.now() - started,
+            dl: bestPayload ? String(bestPayload.descriptionText || '').length : 0,
+            ci_about: bestPayload?.linkedinData?.details?.companyInsight?.aboutSnippet
+              ? String(bestPayload.linkedinData.details.companyInsight.aboutSnippet).length
+              : 0
+          });
+          done({ state: 'w_insight', persistedComplete: false, saveOk: false });
+          return;
+        }
         let persistedComplete = false;
         let saveOk = false;
         if (bestPayload) {

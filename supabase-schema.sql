@@ -97,6 +97,21 @@ ALTER TABLE companies
 ALTER TABLE companies
   ADD COLUMN IF NOT EXISTS financial_providers JSONB;
 
+-- URL LinkedIn canonique : écrite une seule fois à la création / premier scrape, puis figée.
+ALTER TABLE companies
+  ADD COLUMN IF NOT EXISTS linkedin_company_url TEXT,
+  ADD COLUMN IF NOT EXISTS linkedin_company_slug TEXT,
+  ADD COLUMN IF NOT EXISTS linkedin_company_url_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS linkedin_company_url_source TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_companies_linkedin_company_slug
+  ON companies (linkedin_company_slug)
+  WHERE linkedin_company_slug IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_companies_linkedin_company_url
+  ON companies (linkedin_company_url)
+  WHERE linkedin_company_url IS NOT NULL;
+
 -- Flag re-scrape Jobdesk : si true, l’auto-open Client ne considère pas la fiche comme « complète » (même avec description + details_scraped_at).
 ALTER TABLE saved_jobs
   ADD COLUMN IF NOT EXISTS needs_rescrape BOOLEAN NOT NULL DEFAULT false;

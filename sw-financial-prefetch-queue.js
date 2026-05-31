@@ -84,6 +84,26 @@ async function swFinancialPrefetchSaveQueue(queue) {
   return trimmed;
 }
 
+function swFinancialPrefetchContextRichness(ctx) {
+  const c = ctx && typeof ctx === 'object' ? ctx : {};
+  const about = String(c.companyInsightAbout || '').trim();
+  return (
+    (about.length >= 80 ? about.length : 0) +
+    (String(c.companyInsightEmployees || '').trim() ? 500 : 0) +
+    (String(c.companyLinkedinUrl || '').trim() ? 100 : 0) +
+    (c.companyUrlSource === 'insight_card' ? 200 : 0)
+  );
+}
+
+function swFinancialPrefetchMergeQueueContext(existing, incoming) {
+  const a = existing && typeof existing === 'object' ? existing : {};
+  const b = incoming && typeof incoming === 'object' ? incoming : {};
+  if (swFinancialPrefetchContextRichness(b) <= swFinancialPrefetchContextRichness(a)) {
+    return a;
+  }
+  return { ...a, ...b };
+}
+
 function swFinancialPrefetchContextFingerprint(ctx) {
   const c = ctx && typeof ctx === 'object' ? ctx : {};
   const pick = (k) => String(c[k] || '').trim();
@@ -153,16 +173,40 @@ function swFinancialPrefetchIsTransientErrorMessage(msg) {
   );
 }
 
-async function swFinancialPrefetchEnqueue(companyName, companyContext) {
+async function swFinancialPrefetchEnqueue(companyName, companyContext, options) {
   const name = String(companyName || '').trim();
   if (!name) return { ok: false, error: 'Nom manquant' };
 
-  const safeCtx =
+  let safeCtx =
     companyContext && typeof companyContext === 'object' ? swFinancialPrefetchSanitizeCompanyContext(companyContext) : null;
+  if (typeof swMergeCanonicalUrlIntoContext === 'function') {
+    safeCtx = await swMergeCanonicalUrlIntoContext(name, safeCtx);
+  }
 
   const key = swFinancialPrefetchNormalizeKey(name);
+  const forceRefresh =
+    !!(options && options.forceRefresh) || (await swShouldForceFinancialRefresh(name, safeCtx));
 
-  if (await swHasFreshFinancialData(name)) {
+  const canonicalUrl =
+    typeof swGetCanonicalCompanyLinkedinUrl === 'function' ? await swGetCanonicalCompanyLinkedinUrl(name) : '';
+  const ctxUrl =
+    typeof swNormalizeLinkedinCompanyUrl === 'function'
+      ? swNormalizeLinkedinCompanyUrl(safeCtx?.companyLinkedinUrl || '')
+      : String(safeCtx?.companyLinkedinUrl || '').trim();
+  const ctxValidated =
+    safeCtx?.linkedinUrlValidated === true &&
+    typeof swUrlMatchesCompanyName === 'function' &&
+    swUrlMatchesCompanyName(ctxUrl, name);
+  if (!canonicalUrl && !ctxValidated) {
+    swPrefetchLog('financial_prefetch_enqueue', {
+      company_name: name,
+      mode: 'skip-no-canonical-url',
+      ...swFinancialPrefetchContextLogFields(safeCtx)
+    });
+    return { ok: true, mode: 'skip-no-canonical-url' };
+  }
+
+  if (await swHasFreshFinancialData(name) && !forceRefresh) {
     const fp = swFinancialPrefetchContextFingerprint(safeCtx);
     await swFinancialPrefetchRememberContextFingerprint(key, fp);
     void swFinancialPrefetchKick();
@@ -178,22 +222,30 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   }
 
   const q0 = await swFinancialPrefetchLoadQueue();
-  const dupPending = q0.some((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key);
-  if (dupPending) {
+  const dupIdx = q0.findIndex((it) => swFinancialPrefetchNormalizeKey(it?.companyName) === key);
+  if (dupIdx >= 0) {
+    const merged = swFinancialPrefetchMergeQueueContext(q0[dupIdx]?.companyContext, safeCtx);
+    q0[dupIdx] = {
+      ...q0[dupIdx],
+      companyContext: merged,
+      forceRefresh: !!forceRefresh || !!q0[dupIdx]?.forceRefresh
+    };
+    await swFinancialPrefetchSaveQueue(q0);
     void swFinancialPrefetchKick();
     swPrefetchLog('financial_prefetch_enqueue', {
       company_name: name,
-      mode: 'deduped-pending',
-      ...swFinancialPrefetchContextLogFields(safeCtx)
+      mode: forceRefresh ? 'upgrade-pending-refresh' : 'upgrade-pending',
+      force_refresh: forceRefresh ? 1 : 0,
+      ...swFinancialPrefetchContextLogFields(merged)
     });
     try {
-      console.info('[Prospection SW] prefetch enqueue deduped-pending:', name);
+      console.info('[Prospection SW] prefetch enqueue upgrade-pending:', name, forceRefresh ? 'refresh' : '');
     } catch (_) {}
-    return { ok: true, mode: 'deduped-pending' };
+    return { ok: true, mode: forceRefresh ? 'upgrade-pending-refresh' : 'upgrade-pending' };
   }
 
   const recent = await swFinancialPrefetchIsContextFingerprintRecent(key, safeCtx);
-  if (recent.hit) {
+  if (recent.hit && !forceRefresh) {
     void swFinancialPrefetchKick();
     swPrefetchLog('financial_prefetch_enqueue', {
       company_name: name,
@@ -210,6 +262,7 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     companyName: name,
     companyContext: safeCtx,
+    forceRefresh: !!forceRefresh,
     attempts: 0,
     enqueuedAt: Date.now()
   };
@@ -234,7 +287,8 @@ async function swFinancialPrefetchEnqueue(companyName, companyContext) {
   void swFinancialPrefetchKick();
   swPrefetchLog('financial_prefetch_enqueue', {
     company_name: name,
-    mode: 'enqueued',
+    mode: forceRefresh ? 'enqueued-refresh' : 'enqueued',
+    force_refresh: forceRefresh ? 1 : 0,
     ...swFinancialPrefetchContextLogFields(safeCtx)
   });
   try {
@@ -260,10 +314,14 @@ async function swFinancialPrefetchKick() {
         continue;
       }
 
-      if (await swHasFreshFinancialData(name)) {
+      if (await swHasFreshFinancialData(name) && !item?.forceRefresh) {
         q.shift();
         await swFinancialPrefetchSaveQueue(q);
-        swPrefetchLog('financial_prefetch_worker', { company_name: name, mode: 'skip-cached' });
+        swPrefetchLog('financial_prefetch_worker', {
+          company_name: name,
+          mode: 'skip-cached',
+          ...swFinancialPrefetchContextLogFields(item?.companyContext)
+        });
         try {
           console.info('[Prospection SW] prefetch worker skip-cached:', name);
         } catch (_) {}
@@ -272,8 +330,13 @@ async function swFinancialPrefetchKick() {
       }
 
       try {
-        await swGetFinancialData(name, false, item?.companyContext || null);
-        swPrefetchLog('financial_prefetch_worker', { company_name: name, mode: 'success' });
+        await swGetFinancialData(name, !!item?.forceRefresh, item?.companyContext || null);
+        swPrefetchLog('financial_prefetch_worker', {
+          company_name: name,
+          mode: item?.forceRefresh ? 'success-refresh' : 'success',
+          force_refresh: item?.forceRefresh ? 1 : 0,
+          ...swFinancialPrefetchContextLogFields(item?.companyContext)
+        });
         try {
           console.info('[Prospection SW] prefetch worker success:', name);
         } catch (_) {}

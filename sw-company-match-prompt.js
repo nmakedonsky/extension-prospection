@@ -28,8 +28,15 @@ function swValidateMatchContext(ctx) {
   }
   // URL LinkedIn optionnelle : si présente mais non validée (slug ≠ nom), on ne l’envoie pas à Gemini.
   const logo = String(ctx.logoUrl || '').trim();
+  const isCanonical =
+    ctx.companyUrlSource === 'companies_canonical' &&
+    ctx.linkedinUrlValidated === true &&
+    swIsValidLinkedinCompanyUrl(ctx.companyLinkedinUrl);
+  const insightAbout = String(ctx.companyInsightAbout || '').trim();
   if (!logo || !/^https?:\/\//i.test(logo)) {
-    missing.push('logoUrl');
+    if (!(isCanonical && insightAbout.length >= 80)) {
+      missing.push('logoUrl');
+    }
   }
   const jt = String(ctx.jobTitle || '').trim();
   if (jt.length < 2) {
