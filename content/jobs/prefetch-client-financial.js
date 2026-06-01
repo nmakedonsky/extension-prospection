@@ -14,7 +14,6 @@ function prefetchFinancialContextFingerprint(ctx) {
   return [
     pick('companyLinkedinUrl'),
     pick('jobUrl'),
-    pick('jobTitle'),
     pick('jobLocation'),
     pick('logoUrl'),
     pick('logoAlt')

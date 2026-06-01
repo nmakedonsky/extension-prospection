@@ -3,7 +3,7 @@
  * Doit être chargé après company-dock.js (utilise getJobInfoFromWrapper).
  */
 
-const MATCH_CONTEXT_VERSION = 3;
+const MATCH_CONTEXT_VERSION = 4;
 const MATCH_ENSURE_MAX_ATTEMPTS = 6;
 const MATCH_RETRY_DELAY_MS = 380;
 const LOGO_FETCH_MAX_ATTEMPTS = 3;
@@ -791,18 +791,6 @@ function buildCompanyMatchContextSync(wrapper, companyName) {
     logoHit = findLogoFromJobDetailsPane(wrapper, name, jobUrl);
   }
 
-  let jobTitle = pnTrim(jobInfo.jobTitle);
-  if (!jobTitle) {
-    const panel = pnGetOpenJobDetailsPanel();
-    if (panel) {
-      jobTitle = pnTrim(
-        panel.querySelector?.('h1')?.textContent ||
-          panel.querySelector?.('[class*="job-title"]')?.textContent ||
-          ''
-      );
-    }
-  }
-
   const ctx = {
     matchContextVersion: MATCH_CONTEXT_VERSION,
     companyName: name,
@@ -823,7 +811,6 @@ function buildCompanyMatchContextSync(wrapper, companyName) {
     companyLinkedinSlug: companyLinkedinUrl ? pnCompanySlugFromUrl(companyLinkedinUrl) : null,
     linkedinUrlValidated,
     companyUrlSource: urlSource || null,
-    jobTitle,
     jobUrl,
     jobLocation: extractJobLocationHint(wrapper) || null,
     logoInlineData: null,
@@ -832,7 +819,6 @@ function buildCompanyMatchContextSync(wrapper, companyName) {
 
   const missing = [];
   if (!ctx.logoUrl || !/^https?:\/\//i.test(ctx.logoUrl)) missing.push('logoUrl');
-  if (!ctx.jobTitle || ctx.jobTitle.length < 2) missing.push('jobTitle');
   if (!ctx.companyName || ctx.companyName.length < 2) missing.push('companyName');
 
   return { context: ctx, missing };

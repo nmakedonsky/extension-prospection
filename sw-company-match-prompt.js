@@ -3,7 +3,7 @@
  * Validation du contexte avant pipeline / appels LLM.
  */
 
-const SW_MATCH_CONTEXT_VERSION = 3;
+const SW_MATCH_CONTEXT_VERSION = 4;
 
 function swIsValidLinkedinCompanyUrl(u) {
   const s = String(u || '').trim();
@@ -38,10 +38,6 @@ function swValidateMatchContext(ctx) {
       missing.push('logoUrl');
     }
   }
-  const jt = String(ctx.jobTitle || '').trim();
-  if (jt.length < 2) {
-    missing.push('jobTitle');
-  }
   const name = String(ctx.companyName || '').trim();
   if (name.length < 2) {
     missing.push('companyName');
@@ -55,7 +51,7 @@ function swBuildCompanyMatchContextBlock(companyName, ctx) {
   const urlLine =
     c.linkedinUrlValidated === true && swIsValidLinkedinCompanyUrl(c.companyLinkedinUrl)
       ? c.companyLinkedinUrl
-      : '(non fournie — s’appuyer sur l’encart entreprise, le nom, le logo et le titre de l’offre)';
+      : '(non fournie — s’appuyer sur l’encart entreprise, le nom et le logo)';
   const insightBlock =
     c.companyInsightAbout || c.companyInsightEmployees || c.companyInsightName
       ? `--- Encart entreprise LinkedIn (bas du descriptif — source prioritaire) ---
@@ -65,11 +61,13 @@ Description / présentation (extrait, sans dérouler « voir plus ») :
 ${c.companyInsightAbout || '(non extraite)'}
 --- Fin encart entreprise ---`
       : '--- Encart entreprise (bas du descriptif) : non extrait — panneau détail peut-être incomplet ---';
+  const loc = String(c.jobLocation || '').trim();
+  const locLine = loc
+    ? loc
+    : '(non indiquée — ne pas inférer le siège social à partir d’autres indices)';
   return `=== Contexte d'identification entreprise (matching — v${SW_MATCH_CONTEXT_VERSION}) ===
 Nom affiché (carte liste LinkedIn) : ${String(companyName || '').trim()}
-Titre de l'offre : ${c.jobTitle || '(non fourni)'}
-Lieu (indication) : ${c.jobLocation || '(non fourni)'}
-URL de l'offre (si connue) : ${c.jobUrl || '(non fournie)'}
+Localisation d’au moins un poste lié (indication géographique uniquement, pas le siège) : ${locLine}
 URL page entreprise LinkedIn : ${urlLine}
 URL source du logo : ${c.logoUrl || '(manquant)'}
 Texte alt du logo : ${c.logoAlt || '(non fourni)'}

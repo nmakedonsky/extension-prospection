@@ -239,7 +239,6 @@ function swBuildFinancialContextFromJobOffer(jobOffer, companyName, canonicalUrl
   const ctx = {
     matchContextVersion: SW_MATCH_CONTEXT_VERSION,
     companyName,
-    jobTitle: jobOffer?.jobTitle || null,
     jobUrl: jobOffer?.jobUrl || null,
     jobLocation: jobOffer?.location || null,
     logoUrl: ci.logoUrl || ld.card?.logoUrl || null,

@@ -43,7 +43,6 @@ function swFinancialPrefetchSanitizeCompanyContext(ctx) {
     companyInsightAbout: c.companyInsightAbout,
     companyInsightEmployees: c.companyInsightEmployees,
     companyInsightSource: c.companyInsightSource,
-    jobTitle: c.jobTitle,
     jobUrl: c.jobUrl,
     jobLocation: c.jobLocation,
     logoInlineSkipped: c.logoInlineSkipped
@@ -114,7 +113,6 @@ function swFinancialPrefetchContextFingerprint(ctx) {
     pick('companyInsightAbout'),
     pick('companyInsightEmployees'),
     pick('jobUrl'),
-    pick('jobTitle'),
     pick('jobLocation'),
     pick('logoUrl'),
     pick('logoAlt')

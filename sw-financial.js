@@ -80,7 +80,6 @@ function swSanitizeFinancialContextForCache(ctx) {
     logoUrl: ctx.logoUrl ?? null,
     logoAlt: ctx.logoAlt ?? null,
     companyLinkedinUrl: ctx.companyLinkedinUrl ?? null,
-    jobTitle: ctx.jobTitle ?? null,
     jobUrl: ctx.jobUrl ?? null,
     jobLocation: ctx.jobLocation ?? null,
     companyInsightName: ctx.companyInsightName ?? null,
