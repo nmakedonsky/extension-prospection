@@ -60,8 +60,15 @@ function getJobInfoFromWrapper(wrapper) {
       } catch (_) {}
     }
   }
+  const rawTitle = titleEl
+    ? typeof pnVisibleTextFromEl === 'function'
+      ? pnVisibleTextFromEl(titleEl)
+      : String(titleEl.textContent || '').trim()
+    : '';
+  const jobTitle =
+    typeof pnCleanJobTitle === 'function' ? pnCleanJobTitle(rawTitle) : rawTitle.slice(0, 200);
   return {
-    jobTitle: titleEl ? String(titleEl.textContent || '').trim().slice(0, 200) : '',
+    jobTitle,
     jobUrl
   };
 }

@@ -8,6 +8,7 @@
 
 let lastPath = '';
 let __jdBadgeCatchupAt = 0;
+let __jdMissingBadgeClassifyAt = 0;
 
 function tick() {
   applyPathMarkerClass();
@@ -17,27 +18,52 @@ function tick() {
   const payload = buildScanPayload();
   sendHeartbeat(payload, false);
 
-  // Pagination collections (?start=25/50…) : workflow déclenché avant noms société → relancer au bas de liste.
   const now = Date.now();
-  if (
-    now - __jdBadgeCatchupAt >= 2000 &&
-    typeof isClassificationTargetPage === 'function' &&
-    isClassificationTargetPage() &&
-    payload.cardCount > 0 &&
-    payload.clientJobCount === 0 &&
-    typeof jdHasReachedBottomForCurrentList === 'function' &&
-    jdHasReachedBottomForCurrentList() &&
-    typeof jdHasUserScrolledCurrentList === 'function' &&
-    jdHasUserScrolledCurrentList() &&
-    typeof collectJobCards === 'function' &&
-    typeof jdTryStartListWorkflow === 'function'
-  ) {
-    const cards = collectJobCards();
-    const unprocessed = cards.filter((c) => !c?.hasAttribute?.(DATA_PROCESSED)).length;
-    if (unprocessed >= 3) {
-      __jdBadgeCatchupAt = now;
-      jdTryStartListWorkflow('badge-catchup');
+  if (now - __jdBadgeCatchupAt < 1200) return;
+  if (typeof classificationPassRunning !== 'undefined' && classificationPassRunning) return;
+  if (typeof pnListWorkflowRunning !== 'undefined' && pnListWorkflowRunning) return;
+  if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
+  if (payload.cardCount <= 0) return;
+  if (typeof collectJobCards !== 'function') return;
+
+  const seqRunning =
+    typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning;
+
+  // Avant le test gate : porter fully-scrolled si LinkedIn a basculé start= dans l’URL.
+  if (typeof mergeSeenClientJobsFromDom === 'function') {
+    try {
+      mergeSeenClientJobsFromDom();
+    } catch (_) {}
+  }
+
+  const fullyScrolled =
+    typeof jdIsCurrentListFullyScrolled === 'function' && jdIsCurrentListFullyScrolled();
+  const canPaint =
+    (typeof window.pnCanPaintBadgesNow === 'function' && window.pnCanPaintBadgesNow()) ||
+    fullyScrolled ||
+    seqRunning;
+
+  // Re-peindre après scroll complet / pendant scrape — jamais strip dans ces cas.
+  if (canPaint) {
+    __jdBadgeCatchupAt = now;
+    if (typeof window.pnRepaintVisibleBadgesFromCache === 'function') {
+      window.pnRepaintVisibleBadgesFromCache();
     }
+    // Virtualisation / partial : reclasser les cartes encore sans label (throttle).
+    // Pas pendant auto-open : catch-up → pn-client-classified → nouvelles séquences qui cancel.
+    if (
+      fullyScrolled &&
+      !seqRunning &&
+      now - __jdMissingBadgeClassifyAt >= 4500 &&
+      typeof window.pnCatchUpMissingBadges === 'function'
+    ) {
+      __jdMissingBadgeClassifyAt = now;
+      void window.pnCatchUpMissingBadges();
+    }
+  } else if (typeof window.pnStripVisibleListBadges === 'function') {
+    // Cartes recyclées / cache : enlever labels tant qu’on n’est pas en bas.
+    __jdBadgeCatchupAt = now;
+    window.pnStripVisibleListBadges();
   }
 }
 
@@ -68,6 +94,17 @@ setInterval(() => {
     lastPath = location.pathname;
     applyPathMarkerClass();
     scheduleTick();
+    // SPA → collections/search : réveiller scroll-gate / workflow (évite « il faut rafraîchir »)
+    try {
+      if (typeof isClassificationTargetPage === 'function' && isClassificationTargetPage()) {
+        if (typeof window.jdWakeAfterSpaPathChange === 'function') {
+          window.jdWakeAfterSpaPathChange('jobs-run-path');
+        } else if (typeof window.jdTryKickWorkflowAfterScrollHook === 'function') {
+          if (typeof mergeSeenClientJobsFromDom === 'function') mergeSeenClientJobsFromDom();
+          window.jdTryKickWorkflowAfterScrollHook('jobs-run-path');
+        }
+      }
+    } catch (_) {}
   }
 }, 800);
 

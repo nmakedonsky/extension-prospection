@@ -1,5 +1,5 @@
 /**
- * Clics automatiques sur offres « Client » (liste) pour ouvrir la Jobdesk et déclencher l’aspiration.
+ * Clics automatiques sur offres Client + SS2I (liste) pour ouvrir la Jobdesk et déclencher l’aspiration.
  * Dédup par offre (dedupeKeyForCard), délais aléatoires, batch Supabase pour éviter les re-clics inutiles.
  */
 
@@ -15,8 +15,10 @@ const JD_SCROLL_LOG_MS = 22000;
 let __jdAwaitFullScrollLogAt = 0;
 const JD_AWAIT_FULL_SCROLL_LOG_MS = 8000;
 
-/** Clé de liste (URL sans `currentJobId`) → IDs Client vus au scroll (virtualisation LinkedIn). */
+/** Clé de page liste (URL avec `start=`) → IDs Client vus sur CETTE page (compteur / pending). */
 const JD_SEEN_CLIENT_IDS_BY_LIST_KEY = new Map();
+/** Clé stable (sans `start=`) → toutes les offres vues (Client + SS2I) pour last_seen_at Supabase. */
+const JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY = new Map();
 /** Dernière clé de liste pour laquelle on a fusionné le DOM — sert à détecter un changement d’URL liste. */
 let jdMergeLastLk = '';
 const JD_LIST_IDS_CHUNK_CHARS = 7500;
@@ -51,15 +53,48 @@ function scheduleJobsTabSupabaseFlush() {
 }
 
 /**
- * Clé complète par page LinkedIn (incluant `start`).
+ * Params LinkedIn qui changent à chaque clic d’offre (ne doivent PAS reset badges / gate).
+ * Ex. search-results ajoute `eBP=…` → sinon on croit à une « nouvelle recherche » et on strip les labels.
+ */
+const JD_VOLATILE_JOBS_QUERY_PARAMS = [
+  'currentJobId',
+  'cj',
+  'eBP',
+  'trackingId',
+  'refId',
+  'lipi',
+  'lici',
+  'trk',
+  'originalSubdomain',
+  'alertAction',
+  'saved',
+  'isWaitingSubmission',
+  'storeCtaType'
+];
+
+function jdSanitizeJobsSearchParams(sp, { dropStart = false } = {}) {
+  if (!sp) return sp;
+  for (const k of JD_VOLATILE_JOBS_QUERY_PARAMS) {
+    try {
+      sp.delete(k);
+    } catch (_) {}
+  }
+  if (dropStart) {
+    try {
+      sp.delete('start');
+    } catch (_) {}
+  }
+  return sp;
+}
+
+/**
+ * Clé complète par page LinkedIn (incluant `start`, sans params volatils de clic).
  * Utilisée pour le gate "done" (JD_FULLY_SCROLLED_LIST_KEYS) : chaque page paginée a son propre gate.
  */
 function jdListPageKey() {
   try {
     const u = new URL(location.href);
-    const sp = new URLSearchParams(u.search);
-    sp.delete('currentJobId');
-    sp.delete('cj');
+    const sp = jdSanitizeJobsSearchParams(new URLSearchParams(u.search));
     const qs = sp.toString();
     return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
   } catch (_) {
@@ -75,10 +110,7 @@ function jdListPageKey() {
 function jdListBaseKey() {
   try {
     const u = new URL(location.href);
-    const sp = new URLSearchParams(u.search);
-    sp.delete('currentJobId');
-    sp.delete('start');
-    sp.delete('cj');
+    const sp = jdSanitizeJobsSearchParams(new URLSearchParams(u.search), { dropStart: true });
     const qs = sp.toString();
     return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
   } catch (_) {
@@ -86,10 +118,61 @@ function jdListBaseKey() {
   }
 }
 
+/** Retire `start` + params volatils d’une clé liste `pathname?query`. */
+function jdStripStartFromListKey(lk) {
+  if (!lk) return '';
+  try {
+    const q = lk.indexOf('?');
+    if (q < 0) return lk;
+    const path = lk.slice(0, q);
+    const sp = jdSanitizeJobsSearchParams(new URLSearchParams(lk.slice(q + 1)), { dropStart: true });
+    const qs = sp.toString();
+    return `${path}${qs ? `?${qs}` : ''}`;
+  } catch (_) {
+    return lk;
+  }
+}
+
+/** Canonique : même recherche / collection (ignore start= et eBP/currentJobId). */
+function jdCanonicalListKeyFromLk(lk) {
+  return jdStripStartFromListKey(lk);
+}
+
+/** LinkedIn met à jour `start=` / `eBP=` / `currentJobId` — ce n’est pas une nouvelle recherche. */
+function jdIsStartOnlyListKeyChange(prevLk, nextLk) {
+  return !!(
+    prevLk &&
+    nextLk &&
+    prevLk !== nextLk &&
+    jdCanonicalListKeyFromLk(prevLk) === jdCanonicalListKeyFromLk(nextLk)
+  );
+}
+
+/** Clé stable pour IDs vus / déjà ouverts (ne doit pas se fragmenter quand `start` bouge). */
+function jdStableListKey() {
+  return jdListBaseKey() || jdListPageKey();
+}
+
+function jdCarryScrollGatesAcrossStartChange(prevLk, nextLk) {
+  if (!prevLk || !nextLk) return;
+  if (JD_FULLY_SCROLLED_LIST_KEYS.has(prevLk)) {
+    jdPruneSmallSet(JD_FULLY_SCROLLED_LIST_KEYS, 12);
+    JD_FULLY_SCROLLED_LIST_KEYS.add(nextLk);
+  }
+  if (JD_LIST_USER_SCROLLED_KEYS.has(prevLk)) {
+    jdPruneSmallSet(JD_LIST_USER_SCROLLED_KEYS, 12);
+    JD_LIST_USER_SCROLLED_KEYS.add(nextLk);
+  }
+}
+
 function jdPruneSeenIdsMap() {
-  while (JD_SEEN_CLIENT_IDS_BY_LIST_KEY.size > 10) {
+  while (JD_SEEN_CLIENT_IDS_BY_LIST_KEY.size > 16) {
     const k = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.keys().next().value;
     if (k != null) JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(k);
+  }
+  while (JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.size > 10) {
+    const k = JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.keys().next().value;
+    if (k != null) JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.delete(k);
   }
 }
 
@@ -123,7 +206,7 @@ function jdIsListWorkflowActive() {
   const bk = jdListBaseKey();
   const lk = jdListPageKey();
   if (!lk) return false;
-  return JD_WORKFLOW_IN_FLIGHT_KEYS.has(bk) || JD_FULLY_SCROLLED_LIST_KEYS.has(lk);
+  return JD_WORKFLOW_IN_FLIGHT_KEYS.has(bk) || jdIsCurrentListFullyScrolled();
 }
 
 function jdPruneOpenedIdsMap() {
@@ -221,10 +304,43 @@ function jdHasUserScrolledCurrentList() {
   return JD_LIST_USER_SCROLLED_KEYS.has(lk);
 }
 
+/** `start` brut de la clé liste ('' si absent — distinct de start=0 explicite). */
+function jdListKeyStartRaw(lk) {
+  try {
+    const q = String(lk || '').indexOf('?');
+    if (q < 0) return '';
+    return new URLSearchParams(lk.slice(q + 1)).get('start') || '';
+  } catch (_) {
+    return '';
+  }
+}
+
 function jdIsCurrentListFullyScrolled() {
   const lk = jdListPageKey();
   if (!lk) return false;
-  return JD_FULLY_SCROLLED_LIST_KEYS.has(lk);
+  if (JD_FULLY_SCROLLED_LIST_KEYS.has(lk)) return true;
+  // LinkedIn retire souvent `start=` pendant les clics Jobdesk : le gate reste sur
+  // `…&start=25` alors que l’URL courante n’a plus le param → sans heal, tick strip les labels.
+  const canon = jdCanonicalListKeyFromLk(lk);
+  if (!canon) return false;
+  const curStart = jdListKeyStartRaw(lk);
+  for (const k of JD_FULLY_SCROLLED_LIST_KEYS) {
+    if (jdCanonicalListKeyFromLk(k) !== canon) continue;
+    const ks = jdListKeyStartRaw(k);
+    if (ks === curStart) {
+      jdPruneSmallSet(JD_FULLY_SCROLLED_LIST_KEYS, 12);
+      JD_FULLY_SCROLLED_LIST_KEYS.add(lk);
+      return true;
+    }
+    // Flap : URL sans start= alors qu’une page start=N de cette recherche est « done ».
+    // (Pas l’inverse start=N vs gate sans start — ça casserait la pagination 0→25.)
+    if (!curStart && ks) {
+      jdPruneSmallSet(JD_FULLY_SCROLLED_LIST_KEYS, 12);
+      JD_FULLY_SCROLLED_LIST_KEYS.add(lk);
+      return true;
+    }
+  }
+  return false;
 }
 
 function jdMarkCurrentListFullyScrolled(reason = '') {
@@ -234,6 +350,9 @@ function jdMarkCurrentListFullyScrolled(reason = '') {
   jdPruneSmallSet(JD_FULLY_SCROLLED_LIST_KEYS, 12);
   JD_FULLY_SCROLLED_LIST_KEYS.add(lk);
   jdLog('jd_gate', { lk, y: 'open', r: String(reason || '').slice(0, 60) });
+  try {
+    pnSetPageStatus('idle', 'Attente');
+  } catch (_) {}
   return true;
 }
 
@@ -244,8 +363,9 @@ const JD_SCROLL_END_MS = 280;
 const jdScrollHookProbeTimers = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
 
 /**
- * LinkedIn monte souvent la liste après nos scripts : les scroll ont lieu avant addEventListener.
- * Rattrapage uniquement si scrollTop > 0 et bas atteint (preuve d’un scroll réel avant le hook).
+ * Rattrapage après branchement tardif du scroll root / entrée SPA.
+ * - Liste courte (pas de scroll nécessaire) → démarrer comme « bas atteint »
+ * - Liste déjà au bas avec scrollTop > 0 → preuve de scroll avant nos listeners
  */
 function jdTryKickWorkflowAfterScrollHook(reason = '') {
   try {
@@ -257,20 +377,74 @@ function jdTryKickWorkflowAfterScrollHook(reason = '') {
       if (jdHasReachedBottomForCurrentList()) jdOnListScrollFinished();
       return;
     }
-    if (!jdHasReachedBottomForCurrentList()) return;
     const root = jdGetLikelyJobsListScrollRoot();
     if (!root) return;
+    const noScrollNeeded = jdListHasNoScrollNeeded();
+    const atBottom = jdHasReachedBottomForCurrentList();
+    if (!noScrollNeeded && !atBottom) return;
     const overflow = root.scrollHeight - root.clientHeight;
-    const needsScroll = overflow > JD_SCROLL_BOTTOM_EPSILON_PX;
     const st = Number(root.scrollTop) || 0;
-    if (!needsScroll || st <= 1) return;
+    // Liste scrollable : exiger un scrollTop > 0 (restauration SPA) sauf si vraiment sans overflow
+    if (!noScrollNeeded && st <= 1) return;
     jdNoteListScrollActivity();
     jdOnListScrollFinished();
     if (reason && typeof jdLog === 'function') {
-      jdLog('jd_boot', { r: String(reason || '').slice(0, 48), st: Math.round(st), ov: Math.round(overflow) });
+      jdLog('jd_boot', {
+        r: String(reason || '').slice(0, 48),
+        st: Math.round(st),
+        ov: Math.round(overflow),
+        nosc: !!noScrollNeeded
+      });
     }
   } catch (_) {}
 }
+
+/** Entrée SPA /jobs/* : rebrancher le scroll root + kicks différés (liste monte après pushState). */
+let __jdWakeSpaTimer = null;
+let __jdWakeLastCanonical = '';
+function jdWakeAfterSpaPathChange(reason = '') {
+  try {
+    if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
+    const canon = jdCanonicalListKeyFromLk(jdListPageKey()) || '';
+    mergeSeenClientJobsFromDom();
+    // Même recherche (seul currentJobId / eBP change) → ne pas re-kick (bloque le Jobdesk).
+    if (__jdWakeLastCanonical && canon && __jdWakeLastCanonical === canon) return;
+    __jdWakeLastCanonical = canon;
+
+    __jdScrollRootHooked = null;
+    jdEnsureListScrollRootListener(reason || 'spa-wake');
+    jdTryKickWorkflowAfterScrollHook(reason || 'spa-wake');
+    if (__jdWakeSpaTimer) clearTimeout(__jdWakeSpaTimer);
+    __jdWakeSpaTimer = setTimeout(() => {
+      __jdWakeSpaTimer = null;
+      try {
+        if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
+        jdEnsureListScrollRootListener(`${reason || 'spa'}-d1200`);
+        jdTryKickWorkflowAfterScrollHook(`${reason || 'spa'}-d1200`);
+      } catch (_) {}
+    }, 1200);
+  } catch (_) {}
+}
+
+/** Arrête l’auto-open si l’utilisateur clique manuellement une offre (ne pas lutter avec LinkedIn). */
+function jdAbortAutoOpenForUserNavigation(reason = '') {
+  try {
+    openClientJobsSequenceRunning = false;
+    autoOpenRunQueued = false;
+    if (autoOpenCoalesceTimer) {
+      clearTimeout(autoOpenCoalesceTimer);
+      autoOpenCoalesceTimer = null;
+    }
+    deferredAutoOpenWhileTabHidden = false;
+    autoOpenDisabledUntil = Date.now() + 8000;
+    jdLog('jd_nav', { r: 'user-abort-auto', why: String(reason || '').slice(0, 40) });
+  } catch (_) {}
+}
+
+try {
+  window.jdWakeAfterSpaPathChange = jdWakeAfterSpaPathChange;
+  window.jdTryKickWorkflowAfterScrollHook = jdTryKickWorkflowAfterScrollHook;
+} catch (_) {}
 
 function jdScheduleKickAfterScrollHook(root, reason = '') {
   if (!root) return;
@@ -358,11 +532,17 @@ function jdEnsureListScrollRootListener(hookReason = '') {
   return root;
 }
 
-/** Démarre le workflow (badges → clics Client), une fois par page après scroll complet.
+/** Démarre le workflow (badges → clics Client/SS2I), une fois par page après scroll complet.
  *  - JD_FULLY_SCROLLED_LIST_KEYS  : gate par page complète (lk avec start) → page 2, 3... peuvent passer
  *  - JD_WORKFLOW_IN_FLIGHT_KEYS   : verrou pendant le classify (bk sans start) → évite doublons pendant scroll
  */
 function jdTryStartListWorkflow(reason = '') {
+  if (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) {
+    return false;
+  }
+  if (typeof classificationPassRunning !== 'undefined' && classificationPassRunning) {
+    return false;
+  }
   if (!jdHasUserScrolledCurrentList()) return false;
   if (!jdHasReachedBottomForCurrentList()) return false;
   const lk = jdListPageKey();
@@ -395,12 +575,57 @@ function jdLogAwaitFullScroll(reason = '') {
   jdLog('jd_skip', { y: 'await_full_scroll', r: String(reason || '').slice(0, 80) });
 }
 
-/** Tous les jobs Client actuellement présents dans le DOM (colonne liste). */
+/** Cherche la carte DOM d'une offre par son ID LinkedIn (pour un vrai clic plutôt qu'un simple sync d'URL). */
+function jdFindJobCardWrapperById(jid) {
+  const id = String(jid || '').trim();
+  if (!id) return null;
+  const matchesId = (w) => {
+    try {
+      const { jobUrl } = getJobInfoFromWrapper(w);
+      if ((getJobIdFromWrapper(w, jobUrl) || '') === id) return true;
+      if (w.getAttribute?.('data-job-id') === id) return true;
+      if (w.getAttribute?.('data-occludable-job-id') === id) return true;
+      if (w.querySelector?.(`[href*="${id}"]`)) return true;
+    } catch (_) {}
+    return false;
+  };
+  try {
+    // 1) Cartes déjà classées Client/SS2I
+    const aspirable = querySelectorAllDeep(document, pnAspirableJobCardsSelector());
+    for (const w of aspirable) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
+      if (matchesId(w)) return w;
+    }
+  } catch (_) {}
+  try {
+    // 2) Toutes les cartes liste (virtualisation / badge pas encore collé)
+    const cards = typeof collectJobCards === 'function' ? collectJobCards() : [];
+    for (const w of cards) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
+      if (matchesId(w)) return w;
+    }
+  } catch (_) {}
+  try {
+    // 3) Attributs LinkedIn directs
+    const byAttr =
+      document.querySelector(`[data-job-id="${id}"]`) ||
+      document.querySelector(`[data-occludable-job-id="${id}"]`) ||
+      document.querySelector(`a[href*="/jobs/view/${id}"]`)?.closest?.(
+        'li, div[componentkey], article, .job-card-container'
+      );
+    if (byAttr && (!(typeof isJobCardInListColumn === 'function') || isJobCardInListColumn(byAttr))) {
+      return byAttr;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/** Tous les jobs Client + SS2I actuellement présents dans le DOM (colonne liste). */
 function harvestAllClientJobIdsInListColumn() {
   const ids = [];
   const seen = new Set();
   try {
-    const nodes = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`);
+    const nodes = querySelectorAllDeep(document, pnAspirableJobCardsSelector());
     for (const w of nodes) {
       if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
       const { jobUrl } = getJobInfoFromWrapper(w);
@@ -413,11 +638,54 @@ function harvestAllClientJobIdsInListColumn() {
   return ids;
 }
 
+/** Toutes les offres visibles dans la colonne liste (pour last_seen_at en base). */
+function harvestAllJobIdsInListColumn() {
+  const ids = [];
+  const seen = new Set();
+  try {
+    const cards = typeof collectJobCards === 'function' ? collectJobCards() : [];
+    for (const w of cards) {
+      if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
+      const { jobUrl } = getJobInfoFromWrapper(w);
+      const id = getJobIdFromWrapper(w, jobUrl) || '';
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+  } catch (_) {}
+  return ids;
+}
+
+function scheduleLastSeenTouchForJobIds(linkedinJobIds, reason) {
+  const ids = (linkedinJobIds || [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean);
+  if (!ids.length) return;
+  try {
+    sendRuntimeMessageSafe({ action: 'touchSavedJobsLastSeen', linkedinJobIds: ids, reason }, () => {});
+  } catch (_) {}
+}
+
+function flushLastSeenTouchForListKey(lk, reason) {
+  if (!lk) return;
+  const sk = jdStripStartFromListKey(lk) || lk;
+  const set = JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.get(sk);
+  if (!set || set.size === 0) {
+    JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.delete(sk);
+    return;
+  }
+  scheduleLastSeenTouchForJobIds(Array.from(set), reason || 'list-flush');
+  JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.delete(sk);
+}
+
 function mergeSeenClientJobsFromDom() {
   const lk = jdListPageKey();
+  const sk = jdStableListKey();
   if (!lk) {
     if (jdMergeLastLk) {
-      flushAccumulatedClientJobIdsForListKey(jdMergeLastLk, 'left-jobs-list');
+      const prevSk = jdStripStartFromListKey(jdMergeLastLk) || jdMergeLastLk;
+      flushAccumulatedClientJobIdsForListKey(prevSk, 'left-jobs-list');
+      flushLastSeenTouchForListKey(prevSk, 'left-jobs-list');
       jdClearListGatingState(jdMergeLastLk);
       jdMergeLastLk = '';
       scheduleJobsTabSupabaseFlush();
@@ -426,46 +694,123 @@ function mergeSeenClientJobsFromDom() {
   }
   let listKeyChanged = false;
   if (jdMergeLastLk && jdMergeLastLk !== lk) {
-    flushAccumulatedClientJobIdsForListKey(jdMergeLastLk, 'list-url-changed');
-    jdClearListGatingState(jdMergeLastLk);
-    // Réinitialise uniquement le gate de scroll sur la destination (force un re-scroll)
-    // mais conserve les sets seen/opened pour éviter de re-cliquer des jobs déjà traités.
-    jdClearListGatingState(lk);
-    __jdScrollRootHooked = null;
-    listKeyChanged = true;
+    if (jdIsStartOnlyListKeyChange(jdMergeLastLk, lk)) {
+      // Soft : LinkedIn a bougé start= / eBP= / currentJobId — garder badges + gates.
+      const prevStart = (() => {
+        try {
+          return new URLSearchParams(String(jdMergeLastLk).split('?')[1] || '').get('start') || '0';
+        } catch (_) {
+          return '0';
+        }
+      })();
+      const nextStart = (() => {
+        try {
+          return new URLSearchParams(String(lk).split('?')[1] || '').get('start') || '0';
+        } catch (_) {
+          return '0';
+        }
+      })();
+      const startChanged = prevStart !== nextStart;
+      if (startChanged) {
+        // LinkedIn bascule souvent start= (absent ↔ 25) à chaque clic d’offre pendant le scrape.
+        // Ne jamais strip / reset le gate mid-sequence — sinon labels reload + cancels en cascade.
+        const seqRunning =
+          typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning;
+        const prevN = parseInt(prevStart, 10) || 0;
+        const nextN = parseInt(nextStart, 10) || 0;
+        const prevFullyScrolled = JD_FULLY_SCROLLED_LIST_KEYS.has(jdMergeLastLk);
+        // Pagination réelle : start augmente clairement (page N → N+1), hors scrape.
+        const realForwardPage =
+          !seqRunning && prevFullyScrolled && nextN > prevN && nextN - prevN >= 10;
+        if (realForwardPage) {
+          jdClearListGatingState(lk);
+          try {
+            if (typeof window.pnStripVisibleListBadges === 'function') {
+              window.pnStripVisibleListBadges();
+            }
+          } catch (_) {}
+          jdLog('jd_nav', {
+            r: 'start-soft-newpage',
+            from: String(jdMergeLastLk).slice(0, 100),
+            to: String(lk).slice(0, 100)
+          });
+        } else {
+          jdCarryScrollGatesAcrossStartChange(jdMergeLastLk, lk);
+          if (JD_LIST_USER_SCROLLED_KEYS.has(jdMergeLastLk)) {
+            jdPruneSmallSet(JD_LIST_USER_SCROLLED_KEYS, 12);
+            JD_LIST_USER_SCROLLED_KEYS.add(lk);
+          }
+          jdLog('jd_nav', {
+            r: seqRunning ? 'start-soft-seq-hold' : 'start-soft',
+            from: String(jdMergeLastLk).slice(0, 100),
+            to: String(lk).slice(0, 100)
+          });
+        }
+      } else {
+        // Clic offre (eBP / currentJobId) : ne jamais strip les badges.
+        jdCarryScrollGatesAcrossStartChange(jdMergeLastLk, lk);
+        jdLog('jd_nav', {
+          r: 'volatile-soft',
+          from: String(jdMergeLastLk).slice(0, 100),
+          to: String(lk).slice(0, 100)
+        });
+      }
+    } else {
+      const prevSk = jdStripStartFromListKey(jdMergeLastLk) || jdMergeLastLk;
+      flushAccumulatedClientJobIdsForListKey(prevSk, 'list-url-changed');
+      flushLastSeenTouchForListKey(prevSk, 'list-url-changed');
+      jdClearListGatingState(jdMergeLastLk);
+      // Nouvelle recherche / autre collection : force un re-scroll sur la destination.
+      jdClearListGatingState(lk);
+      __jdScrollRootHooked = null;
+      listKeyChanged = true;
+    }
   }
+  // Clients : compteur + pending par page (clé avec start=) — pas de cumul 0→175.
   if (!JD_SEEN_CLIENT_IDS_BY_LIST_KEY.has(lk)) {
     jdPruneSeenIdsMap();
     JD_SEEN_CLIENT_IDS_BY_LIST_KEY.set(lk, new Set());
   }
   const set = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.get(lk);
   for (const id of harvestAllClientJobIdsInListColumn()) set.add(id);
+  // last_seen : cumul sur la collection (clé stable sans start=)
+  if (!JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.has(sk)) {
+    jdPruneSeenIdsMap();
+    JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.set(sk, new Set());
+  }
+  const allSet = JD_SEEN_ALL_JOB_IDS_BY_LIST_KEY.get(sk);
+  for (const id of harvestAllJobIdsInListColumn()) allSet.add(id);
   jdMergeLastLk = lk;
   if (listKeyChanged) scheduleJobsTabSupabaseFlush();
 }
 
-/** Envoie une fois vers Supabase la liste cumulée pour `lk`, puis vide l’entrée locale (peu de requêtes). */
+/** Envoie une fois vers Supabase la liste cumulée pour la collection, puis vide les pages locales. */
 function flushAccumulatedClientJobIdsForListKey(lk, reason) {
   if (!lk) return;
-  const set = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.get(lk);
-  if (!set || set.size === 0) {
-    JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(lk);
-    return;
+  const sk = jdStripStartFromListKey(lk) || lk;
+  const merged = new Set();
+  const keysToDelete = [];
+  for (const [k, set] of JD_SEEN_CLIENT_IDS_BY_LIST_KEY) {
+    if (k === lk || k === sk || (jdStripStartFromListKey(k) || k) === sk) {
+      for (const id of set) merged.add(id);
+      keysToDelete.push(k);
+    }
   }
-  const sorted = Array.from(set).sort();
+  for (const k of keysToDelete) JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(k);
+  if (merged.size === 0) return;
+  const sorted = Array.from(merged).sort();
   const joined = sorted.join(',');
   const n = sorted.length;
   const r = String(reason || '').slice(0, 60);
   if (joined.length <= JD_LIST_IDS_CHUNK_CHARS) {
-    jdLog('jd_list', { lk, n, r, ids: joined });
+    jdLog('jd_list', { lk: sk, n, r, ids: joined });
   } else {
     const pt = Math.ceil(joined.length / JD_LIST_IDS_CHUNK_CHARS);
     for (let pi = 0; pi < pt; pi++) {
       const chunk = joined.slice(pi * JD_LIST_IDS_CHUNK_CHARS, (pi + 1) * JD_LIST_IDS_CHUNK_CHARS);
-      jdLog('jd_list', { lk, n, r, pi, pt, ids: chunk });
+      jdLog('jd_list', { lk: sk, n, r, pi, pt, ids: chunk });
     }
   }
-  JD_SEEN_CLIENT_IDS_BY_LIST_KEY.delete(lk);
 }
 
 function jdPageKey() {
@@ -482,7 +827,7 @@ function jdPageKey() {
 function jdClientIdsSample(maxN = 16, maxChars = 200) {
   const out = [];
   try {
-    const nodes = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`);
+    const nodes = querySelectorAllDeep(document, pnAspirableJobCardsSelector());
     for (const w of nodes) {
       if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
       const { jobUrl } = getJobInfoFromWrapper(w);
@@ -533,13 +878,25 @@ function randomDelayMsAfterScrapeComplete() {
 }
 
 async function jdAwaitJobScrapeAfterOpen(wrapper, jid, lk) {
+  // search-results : l’encart « Infos entreprise » charge souvent mal → description suffit.
+  let requireCompanyInsight = true;
+  try {
+    const p = String(location.pathname || '');
+    if (p.includes('/jobs/search-results') || p.includes('/jobs/search/')) {
+      requireCompanyInsight = false;
+    }
+  } catch (_) {}
   const scrapeRes = await scheduleJobOfferScrape(wrapper, {
     o: 'a',
     jid: jid || undefined,
     waitForSupabaseComplete: true,
-    requireCompanyInsight: true
+    requireCompanyInsight
   });
-  if (scrapeRes?.state === 'ok' && scrapeRes?.persistedComplete) {
+  // Succès si sauvé (confirmé) OU ok avec saveOk (réseau lent / présence différée).
+  if (
+    scrapeRes?.state === 'ok' &&
+    (scrapeRes?.persistedComplete || scrapeRes?.saveOk)
+  ) {
     return scrapeRes;
   }
   if (jid && lk) {
@@ -591,7 +948,7 @@ function isJobCardIntersectingViewport(el, verticalMargin = 0) {
 }
 
 function getVisibleClientJobCardsTopToBottom() {
-  const all = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`).filter(
+  const all = querySelectorAllDeep(document, pnAspirableJobCardsSelector()).filter(
     (w) => typeof isJobCardInListColumn === 'function' && isJobCardInListColumn(w)
   );
   const visible = all.filter((w) => isJobCardIntersectingViewport(w, AUTO_OPEN_VIEWPORT_MARGIN_PX));
@@ -622,8 +979,8 @@ function syncUrlCurrentJobId(jobId) {
     const prev = window.history.state;
     const nextState =
       prev && typeof prev === 'object' ? { ...prev, currentJobId: String(jobId) } : { currentJobId: String(jobId) };
+    // Pas de popstate : ça casse souvent le panneau Jobdesk search-results (panel=0).
     window.history.replaceState(nextState, '', u.toString());
-    window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
     return true;
   } catch (_) {
     return false;
@@ -678,29 +1035,51 @@ function performAutoOpenClientJobActions(wrapper) {
     wrapper.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
   } catch (_) {}
 
+  let clicked = false;
   if (getJobIdFromComponentKey(wrapper) && wrapper.getAttribute('role') === 'button') {
     dispatchSyntheticPointerClick(wrapper);
-    if (jobId) syncUrlCurrentJobId(jobId);
-    return true;
+    clicked = true;
+  } else {
+    const link = getJobOpenLinkFromCard(wrapper);
+    if (link) {
+      try {
+        link.focus({ preventScroll: true });
+      } catch (_) {}
+      dispatchSyntheticPointerClick(link);
+      clicked = true;
+    } else if (tryClickJobCardOpenTarget(wrapper)) {
+      clicked = true;
+    }
   }
-
-  const link = getJobOpenLinkFromCard(wrapper);
-  if (link) {
+  // Sync URL seulement après un vrai clic (évite replaceState seul qui laisse panel vide).
+  if (clicked && jobId) {
     try {
-      link.focus({ preventScroll: true });
+      syncUrlCurrentJobId(jobId);
     } catch (_) {}
-    dispatchSyntheticPointerClick(link);
-    if (jobId) syncUrlCurrentJobId(jobId);
-    return true;
   }
-  if (tryClickJobCardOpenTarget(wrapper)) {
-    if (jobId) syncUrlCurrentJobId(jobId);
-    return true;
+  return clicked;
+}
+
+function jdIsSafeJobOpenHref(href) {
+  const h = String(href || '').toLowerCase();
+  if (!h || h === '#' || h.startsWith('javascript:')) return false;
+  // Jamais naviguer hors liste jobs (help « I’m interested », company/life…).
+  if (
+    h.includes('/help/') ||
+    h.includes('/company/') ||
+    h.includes('/in/') ||
+    h.includes('/preload') ||
+    h.includes('interested')
+  ) {
+    return false;
   }
-  if (jobId && syncUrlCurrentJobId(jobId)) {
-    return true;
-  }
-  return false;
+  return (
+    h.includes('/jobs/view/') ||
+    h.includes('/jobs/search') ||
+    h.includes('/jobs/collections') ||
+    h.includes('currentjobid=') ||
+    /\/jobs\/[^/?#]+-emplois/i.test(h)
+  );
 }
 
 function getJobOpenLinkFromCard(wrapper) {
@@ -711,31 +1090,32 @@ function getJobOpenLinkFromCard(wrapper) {
     'a[href*="/jobs/collections"][href*="currentJobId="]',
     'a[href*="/jobs?"]',
     'a[href*="linkedin.com/jobs/"]',
-    'a[href*="/jobs/"]',
-    'a[href*="jobs"]'
+    'a[href*="/jobs/"]'
   ];
   for (const sel of prefer) {
     const a = wrapper.querySelector(sel);
-    if (a && a.getAttribute('href')) return a;
+    if (a && jdIsSafeJobOpenHref(a.getAttribute('href'))) return a;
   }
   const roleLink = wrapper.querySelector('[role="link"][href]');
-  if (roleLink && roleLink.getAttribute('href')) return roleLink;
+  if (roleLink && jdIsSafeJobOpenHref(roleLink.getAttribute('href'))) return roleLink;
   return null;
 }
 
 function tryClickJobCardOpenTarget(wrapper) {
   if (!wrapper) return false;
   const candidates = [
-    () => wrapper.querySelector('a[href*="job"]'),
-    () => wrapper.querySelector('[role="link"]'),
+    () => wrapper.querySelector('a[href*="/jobs/view/"]'),
+    () => wrapper.querySelector('a[href*="currentJobId="]'),
     () => wrapper.querySelector('[role="button"][tabindex]'),
     () => wrapper.querySelector('.job-card-container__link'),
     () => wrapper.querySelector('[class*="job-card-list__title"]'),
-    () => wrapper
+    () => (wrapper.getAttribute?.('role') === 'button' ? wrapper : null)
   ];
   for (const getEl of candidates) {
     const el = getEl();
     if (!el || typeof el.click !== 'function') continue;
+    if (el.tagName === 'A' && !jdIsSafeJobOpenHref(el.getAttribute('href'))) continue;
+    if (el.closest?.('a[href*="/company/"], a[href*="/help/"], a[href*="/in/"]')) continue;
     try {
       el.click();
       return true;
@@ -786,7 +1166,7 @@ function pruneClientJobOpenQueueFromPresentComplete(present) {
 
 function findClientJobCardWrapperByDedupKey(key) {
   if (!key) return null;
-  const nodes = querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`);
+  const nodes = querySelectorAllDeep(document, pnAspirableJobCardsSelector());
   for (const w of nodes) {
     if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
     if (dedupeKeyForCard(w) === key) return w;
@@ -833,6 +1213,7 @@ function querySavedJobsPresenceFromBackground(items) {
 
 function getSeenClientJobIdsForListKey(lk) {
   if (!lk) return [];
+  // Compteur / pending : page courante (clé avec start=), pas le cumul collection.
   const set = JD_SEEN_CLIENT_IDS_BY_LIST_KEY.get(lk);
   if (!set || set.size === 0) return [];
   return Array.from(set)
@@ -843,13 +1224,15 @@ function getSeenClientJobIdsForListKey(lk) {
 
 async function getPendingClientJobIdsForCurrentList() {
   const lk = jdListPageKey();
-  if (!lk) return { lk: '', ids: [], presentCount: 0, totalSeen: 0 };
+  const sk = jdStableListKey();
+  if (!lk || !sk) return { lk: '', ids: [], presentCount: 0, totalSeen: 0 };
   const seenIds = getSeenClientJobIdsForListKey(lk);
-  if (!seenIds.length) return { lk, ids: [], presentCount: 0, totalSeen: 0 };
+  if (!seenIds.length) return { lk: sk, ids: [], presentCount: 0, totalSeen: 0 };
 
-  const opened = jdGetOpenedIdsSetForListKey(lk);
+  // Ouverts : clé stable pour ne pas recliquer la même offre sur une autre page start=
+  const opened = jdGetOpenedIdsSetForListKey(sk);
   const baseIds = seenIds.filter((id) => !opened.has(id));
-  if (!baseIds.length) return { lk, ids: [], presentCount: 0, totalSeen: seenIds.length };
+  if (!baseIds.length) return { lk: sk, ids: [], presentCount: 0, totalSeen: seenIds.length };
 
   const lookupItems = baseIds.map((id) => ({ dedupKey: `jid:${id}`, linkedinJobId: id }));
   const present = await querySavedJobsPresenceFromBackground(lookupItems);
@@ -861,7 +1244,7 @@ async function getPendingClientJobIdsForCurrentList() {
     }
   }
   const ids = baseIds.filter((id) => !present[`jid:${id}`]);
-  return { lk, ids, presentCount, totalSeen: seenIds.length };
+  return { lk: sk, ids, presentCount, totalSeen: seenIds.length };
 }
 
 let openClientJobsSequenceRunning = false;
@@ -873,9 +1256,101 @@ let autoOpenAfterClientTimer = null;
 /** File reportée tant que l’onglet LinkedIn n’est pas visible. */
 let deferredAutoOpenWhileTabHidden = false;
 
+function pnEnsurePageStatusPill() {
+  let el = document.getElementById('pn-page-status');
+  if (el) {
+    pnMountPageStatusInDock(el);
+    return el;
+  }
+  el = document.createElement('div');
+  el.id = 'pn-page-status';
+  el.setAttribute('role', 'status');
+  el.setAttribute('aria-live', 'polite');
+  el.innerHTML =
+    '<span class="pn-page-status__dot" aria-hidden="true"></span><span class="pn-page-status__label"></span>';
+  if (!pnMountPageStatusInDock(el)) {
+    try {
+      document.documentElement.appendChild(el);
+    } catch (_) {
+      return null;
+    }
+  }
+  return el;
+}
+
+/** Place le compteur à droite de « Prospection » dans le bandeau du dock gauche. */
+function pnMountPageStatusInDock(el) {
+  if (!el) return false;
+  try {
+    if (typeof ensureFinancialDock === 'function') ensureFinancialDock();
+  } catch (_) {}
+  const host =
+    document.querySelector('.lph-financial-dock__status-host') ||
+    document.querySelector('[data-pn-status-host="1"]');
+  if (!host) return false;
+  if (el.parentElement !== host) {
+    try {
+      host.appendChild(el);
+    } catch (_) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Pastille bas-droite : idle | running | ready
+ * Libellés : « 5/10 » = 5 offres déjà traitées / 10 aspirables (Client+SS2I) vues sur la liste.
+ * @param {'idle'|'running'|'ready'} state
+ * @param {string} [label]
+ */
+function pnSetPageStatus(state, label) {
+  const el = pnEnsurePageStatusPill();
+  if (!el) return;
+  const st = state === 'running' || state === 'ready' ? state : 'idle';
+  el.dataset.state = st;
+  el.dataset.visible = '1';
+  const labelEl = el.querySelector('.pn-page-status__label');
+  if (labelEl) {
+    labelEl.textContent =
+      label ||
+      (st === 'running' ? '…' : st === 'ready' ? 'OK' : 'Attente');
+  }
+}
+
+/** @param {number} done Offres déjà OK (base + cliquées) @param {number} total Offres aspirables vues sur la liste */
+function pnSetPageStatusRunning(done, total) {
+  const d = Math.max(0, Number(done) || 0);
+  const t = Math.max(0, Number(total) || 0);
+  const shown = t > 0 ? Math.min(d, t) : d;
+  pnSetPageStatus('running', t > 0 ? `${shown}/${t}` : '…');
+}
+
+/** @param {{ done?: number, scraped?: number, known?: number, total?: number }} [opts] */
+function pnSetPageStatusReady(opts) {
+  const total = Number(opts?.total);
+  const doneExplicit = Number(opts?.done);
+  const scraped = Number(opts?.scraped);
+  const known = Number(opts?.known);
+  const t = Number.isFinite(total) && total > 0 ? total : 0;
+  const d = Number.isFinite(doneExplicit)
+    ? doneExplicit
+    : Math.max(
+        0,
+        (Number.isFinite(scraped) ? scraped : 0) + (Number.isFinite(known) ? known : 0)
+      );
+  if (t > 0) {
+    const shown = Math.min(Math.max(d, 0), t);
+    pnSetPageStatus('ready', `OK · ${shown}/${t}`);
+    return;
+  }
+  pnSetPageStatus('ready', 'OK');
+}
+
 function requestAutoOpenRun(reason = '') {
   const now = Date.now();
   if (now < autoOpenDisabledUntil) return;
+  if (!isJobsListSpaPath()) return;
   lastJdRunReason = String(reason || '').slice(0, 80);
   const immediateAfterFullScroll = lastJdRunReason.includes('full-scroll-ready');
   if (!pnTabVisibleForAutoOpen()) {
@@ -906,10 +1381,17 @@ function requestAutoOpenRun(reason = '') {
 }
 
 function scheduleAutoOpenAfterClientClassified() {
+  // Pendant une séquence de clics : ne pas re-planifier (évite cancels + reclassif).
+  if (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) {
+    return;
+  }
   if (!jdIsCurrentListFullyScrolled()) return;
   if (autoOpenAfterClientTimer) clearTimeout(autoOpenAfterClientTimer);
   autoOpenAfterClientTimer = setTimeout(() => {
     autoOpenAfterClientTimer = null;
+    if (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) {
+      return;
+    }
     if (!jdIsCurrentListFullyScrolled()) return;
     requestAutoOpenRun('after-client-classified');
   }, AUTO_OPEN_AFTER_CLIENT_MS);
@@ -917,6 +1399,10 @@ function scheduleAutoOpenAfterClientClassified() {
 
 async function tryAutoOpenNewVisibleClientJobs() {
   if (Date.now() < autoOpenDisabledUntil) return;
+  if (!isJobsListSpaPath()) {
+    jdLog('jd_skip', { y: 'not_jobs_list', r: lastJdRunReason });
+    return;
+  }
   if (!pnTabVisibleForAutoOpen()) {
     deferredAutoOpenWhileTabHidden = true;
     return;
@@ -944,32 +1430,85 @@ async function tryAutoOpenNewVisibleClientJobs() {
 
   if (pendingById.ids.length > 0) {
     let batchOpened = 0;
+    const totalClients = Math.max(
+      pendingById.totalSeen || 0,
+      pendingById.ids.length + pendingById.presentCount
+    );
+    const doneBase = Math.max(0, totalClients - pendingById.ids.length);
+    pnSetPageStatusRunning(doneBase, totalClients);
     try {
       for (let i = 0; i < pendingById.ids.length; i++) {
+        if (!isJobsListSpaPath()) {
+          jdLog('jd_nav', { r: 'left-jobs-mid-seq' });
+          break;
+        }
         if (!pnTabVisibleForAutoOpen()) {
           deferredAutoOpenWhileTabHidden = true;
           autoOpenRunQueued = true;
           break;
         }
         const jid = pendingById.ids[i];
-        const opened = syncUrlCurrentJobId(jid);
+        // Compteur = succès seulement (pas i) — sinon 25/25 puis retour à 24/25 si échec.
+        pnSetPageStatusRunning(doneBase + batchOpened, totalClients);
+        try {
+          // Léger : re-peindre depuis le cache seulement.
+          // Ne PAS relancer pnEnsure… (classify + retries) entre chaque clic — ça ralentit énormément.
+          if (typeof window.pnRepaintVisibleBadgesFromCache === 'function') {
+            window.pnRepaintVisibleBadgesFromCache();
+          }
+        } catch (_) {}
+        // Préférer un vrai clic sur la carte (si présente dans le DOM) : un simple
+        // history.replaceState (syncUrlCurrentJobId) ne déclenche pas toujours le
+        // chargement du panneau Jobdesk côté LinkedIn (liste paginée / carte hors virtualisation)
+        // → panneau figé sur l'offre précédente et description jamais chargée (e_nodesc en boucle).
+        const wrapperForJid = jdFindJobCardWrapperById(jid);
+        let opened = false;
+        let clickedReal = false;
+        if (wrapperForJid) {
+          opened = performAutoOpenClientJobActions(wrapperForJid);
+          clickedReal = opened;
+        }
+        if (!opened) {
+          opened = syncUrlCurrentJobId(jid);
+        }
         let scrapeRes = null;
         if (opened) {
-          jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
+          if (clickedReal) saveJobCardSnapshot(wrapperForJid);
           jdLog('jd_click', {
             jid,
             i,
             m: pendingById.ids.length,
-            r: `${lastJdRunReason}|id-pass`
+            r: `${lastJdRunReason}|id-pass`,
+            ck: clickedReal ? 1 : 0
           });
-          scrapeRes = await jdAwaitJobScrapeAfterOpen(null, jid, pendingById.lk);
+          scrapeRes = await jdAwaitJobScrapeAfterOpen(clickedReal ? wrapperForJid : null, jid, pendingById.lk);
+          // Marquer ouvert + compteur seulement si le panneau correspond vraiment au jid.
           if (scrapeRes?.state === 'ok') {
+            jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
             batchOpened += 1;
+          } else if (scrapeRes?.state === 'e_jid' || scrapeRes?.state === 'e_nodesc') {
+            // Ne pas rester bloqué 24/25 : offre sans panneau / sans desc → skip session.
+            jdGetOpenedIdsSetForListKey(pendingById.lk).add(jid);
+            batchOpened += 1;
+            jdLog('jd_fail', {
+              jid,
+              m: scrapeRes.state === 'e_jid' ? 'panel_jid_mismatch' : 'nodesc_skip',
+              i,
+              r: lastJdRunReason,
+              ck: clickedReal ? 1 : 0
+            });
           }
         } else {
           jdLog('jd_fail', { jid, m: 'open-by-id', i, r: lastJdRunReason });
         }
-        if (opened && scrapeRes?.state === 'ok' && i < pendingById.ids.length - 1) {
+        pnSetPageStatusRunning(doneBase + batchOpened, totalClients);
+        if (
+          opened &&
+          (scrapeRes?.state === 'ok' ||
+            scrapeRes?.state === 'e_nodesc' ||
+            scrapeRes?.state === 'e_jid') &&
+          i < pendingById.ids.length - 1
+        ) {
           const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsAfterScrapeComplete());
           if (!stillHere) {
             deferredAutoOpenWhileTabHidden = true;
@@ -987,6 +1526,12 @@ async function tryAutoOpenNewVisibleClientJobs() {
         vi: pendingById.totalSeen
       });
       openClientJobsSequenceRunning = false;
+      pnSetPageStatusReady({
+        done: doneBase + batchOpened,
+        scraped: batchOpened,
+        known: pendingById.presentCount,
+        total: totalClients
+      });
       if (autoOpenRunQueued) {
         autoOpenRunQueued = false;
         requestAutoOpenRun('queued-after-running');
@@ -1002,8 +1547,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
     if (autoOpenedClientJobKeys.has(k)) return false;
     const jid = resolveJobIdForOpen(w) || '';
     if (jid) {
-      const lk = jdListPageKey();
-      const openedById = jdGetOpenedIdsSetForListKey(lk);
+      const openedById = jdGetOpenedIdsSetForListKey(jdStableListKey());
       if (openedById.has(jid)) return false;
     }
     return true;
@@ -1012,6 +1556,7 @@ async function tryAutoOpenNewVisibleClientJobs() {
   if (pending.length === 0) {
     jdLog('jd_skip', { y: 'no_pending', r: lastJdRunReason });
     openClientJobsSequenceRunning = false;
+    pnSetPageStatusReady({ scraped: 0, known: 0 });
     return;
   }
 
@@ -1047,11 +1592,20 @@ async function tryAutoOpenNewVisibleClientJobs() {
   if (pendingToOpen.length === 0) {
     jdLog('jd_skip', { y: 'all_sb', r: lastJdRunReason, n: pending.length });
     openClientJobsSequenceRunning = false;
+    pnSetPageStatusReady({
+      done: pending.length,
+      scraped: 0,
+      known: Object.keys(present || {}).length,
+      total: pending.length || Object.keys(present || {}).length
+    });
     return;
   }
 
   // openClientJobsSequenceRunning déjà = true (posé avant le premier await)
   let batchOpened = 0;
+  const totalClients = pending.length;
+  const doneBase = Math.max(0, totalClients - pendingToOpen.length);
+  pnSetPageStatusRunning(doneBase, totalClients);
   try {
     for (let i = 0; i < pendingToOpen.length; i++) {
       if (!pnTabVisibleForAutoOpen()) {
@@ -1063,15 +1617,13 @@ async function tryAutoOpenNewVisibleClientJobs() {
       if (!wrapper.isConnected) continue;
       const k = dedupeKeyForCard(wrapper);
       if (!k || autoOpenedClientJobKeys.has(k)) continue;
+      pnSetPageStatusRunning(doneBase + batchOpened, totalClients);
       const jid = resolveJobIdForOpen(wrapper) || '';
-      const lk = jdListPageKey();
+      const sk = jdStableListKey();
       const opened = performAutoOpenClientJobActions(wrapper);
       let scrapeRes = null;
       if (opened) {
         saveJobCardSnapshot(wrapper);
-        autoOpenedClientJobKeys.add(k);
-        if (jid) jdGetOpenedIdsSetForListKey(lk).add(jid);
-        dequeueClientJobOpenKey(k);
         jdLog('jd_click', {
           jid: String(jid),
           lk: jdListPageKey() || undefined,
@@ -1079,14 +1631,36 @@ async function tryAutoOpenNewVisibleClientJobs() {
           m: pendingToOpen.length,
           r: lastJdRunReason
         });
-        scrapeRes = await jdAwaitJobScrapeAfterOpen(wrapper, jid, lk);
+        scrapeRes = await jdAwaitJobScrapeAfterOpen(wrapper, jid, sk);
         if (scrapeRes?.state === 'ok') {
+          autoOpenedClientJobKeys.add(k);
+          if (jid) jdGetOpenedIdsSetForListKey(sk).add(jid);
+          dequeueClientJobOpenKey(k);
           batchOpened += 1;
+        } else if (scrapeRes?.state === 'e_jid' || scrapeRes?.state === 'e_nodesc') {
+          autoOpenedClientJobKeys.add(k);
+          if (jid) jdGetOpenedIdsSetForListKey(sk).add(jid);
+          dequeueClientJobOpenKey(k);
+          batchOpened += 1;
+          jdLog('jd_fail', {
+            jid: String(jid),
+            k: String(k).slice(0, 80),
+            m: scrapeRes.state === 'e_jid' ? 'panel_jid_mismatch' : 'nodesc_skip',
+            i,
+            r: lastJdRunReason
+          });
         }
       } else {
         jdLog('jd_fail', { jid: String(jid), k: String(k).slice(0, 80), m: 'open', i, r: lastJdRunReason });
       }
-      if (opened && scrapeRes?.state === 'ok' && i < pendingToOpen.length - 1) {
+      pnSetPageStatusRunning(doneBase + batchOpened, totalClients);
+      if (
+        opened &&
+        (scrapeRes?.state === 'ok' ||
+          scrapeRes?.state === 'e_nodesc' ||
+          scrapeRes?.state === 'e_jid') &&
+        i < pendingToOpen.length - 1
+      ) {
         const stillHere = await sleepBetweenClicksOrUntilHidden(randomDelayMsAfterScrapeComplete());
         if (!stillHere) {
           deferredAutoOpenWhileTabHidden = true;
@@ -1098,6 +1672,12 @@ async function tryAutoOpenNewVisibleClientJobs() {
   } finally {
     jdLog('jd_seq', { cl: batchOpened, tot: pendingToOpen.length, r: lastJdRunReason });
     openClientJobsSequenceRunning = false;
+    pnSetPageStatusReady({
+      done: doneBase + batchOpened,
+      scraped: batchOpened,
+      known: doneBase,
+      total: totalClients
+    });
     if (autoOpenRunQueued) {
       autoOpenRunQueued = false;
       requestAutoOpenRun('queued-after-running');
@@ -1131,11 +1711,55 @@ const debouncedAutoOpenOnMutation = debounce(() => {
 function installPnHistoryAutoOpenListener() {
   if (window.__pnHistoryAutoOpenListener) return;
   window.__pnHistoryAutoOpenListener = true;
+  let lastCanon = '';
+  let lastStart = '';
   const onPathChange = () => {
-    mergeSeenClientJobsFromDom();
-    __jdScrollRootHooked = null;
-    jdEnsureListScrollRootListener('spa-nav');
-    jdTryKickWorkflowAfterScrollHook('spa-nav-sync');
+    // Navigation hors liste jobs (help, company/life…) : couper l’auto-open immédiatement.
+    if (!isJobsListSpaPath()) {
+      try {
+        if (openClientJobsSequenceRunning && typeof pnCancelActiveJobScrape === 'function') {
+          pnCancelActiveJobScrape('left-jobs');
+        }
+        openClientJobsSequenceRunning = false;
+        autoOpenRunQueued = false;
+        if (autoOpenCoalesceTimer) {
+          clearTimeout(autoOpenCoalesceTimer);
+          autoOpenCoalesceTimer = null;
+        }
+        jdLog('jd_nav', { r: 'left-jobs-abort', path: String(location.pathname || '').slice(0, 80) });
+      } catch (_) {}
+      lastCanon = '';
+      lastStart = '';
+      return;
+    }
+    let canon = '';
+    let start = '0';
+    try {
+      const lk = jdListPageKey();
+      canon = jdCanonicalListKeyFromLk(lk) || '';
+      start = new URLSearchParams(String(lk).split('?')[1] || '').get('start') || '0';
+    } catch (_) {}
+    const sameList = lastCanon && canon && lastCanon === canon;
+    const sameStart = lastStart === start;
+    lastCanon = canon || lastCanon;
+    lastStart = start;
+    const seqRunning =
+      typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning;
+    // Clic job (eBP/currentJobId) ou flap start= pendant scrape : merge seulement — pas de wake/kick.
+    if (sameList && (sameStart || seqRunning)) {
+      try {
+        mergeSeenClientJobsFromDom();
+      } catch (_) {}
+      return;
+    }
+    if (typeof jdWakeAfterSpaPathChange === 'function') {
+      jdWakeAfterSpaPathChange(sameList ? 'spa-start' : 'spa-nav');
+    } else {
+      mergeSeenClientJobsFromDom();
+      __jdScrollRootHooked = null;
+      jdEnsureListScrollRootListener('spa-nav');
+      jdTryKickWorkflowAfterScrollHook('spa-nav-sync');
+    }
   };
   try {
     const wrap = (name) => {
@@ -1143,8 +1767,8 @@ function installPnHistoryAutoOpenListener() {
       if (typeof orig !== 'function') return;
       history[name] = function (...args) {
         const r = orig.apply(this, args);
-        mergeSeenClientJobsFromDom();
-        onPathChange();
+        // Différé : ne pas bloquer le thread LinkedIn pendant replaceState.
+        setTimeout(onPathChange, 0);
         return r;
       };
     };
@@ -1152,8 +1776,7 @@ function installPnHistoryAutoOpenListener() {
     wrap('replaceState');
   } catch (_) {}
   window.addEventListener('popstate', () => {
-    mergeSeenClientJobsFromDom();
-    onPathChange();
+    setTimeout(onPathChange, 0);
   });
 }
 
@@ -1170,7 +1793,9 @@ function attachAutoOpenScrollListeners() {
 function installAutoOpenMutationObserver() {
   if (window.__pnAutoOpenMutationObserver) return;
   window.__pnAutoOpenMutationObserver = true;
-  const mo = new MutationObserver(() => debouncedAutoOpenOnMutation());
+  const mo = new MutationObserver(() => {
+    debouncedAutoOpenOnMutation();
+  });
   try {
     mo.observe(document.documentElement, { childList: true, subtree: true });
   } catch (_) {}
@@ -1200,40 +1825,90 @@ function installAutoOpenVisibilityListener() {
 }
 
 (function initPnJobdeskAutoOpen() {
-  if (window.__pnJobdeskAutoopenInstalled) return;
-  if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
-  window.__pnJobdeskAutoopenInstalled = true;
+  /** Listeners SPA/scroll : toujours, même hors Jobs (sinon on rate le pushState feed → collections). */
+  function installAlwaysOnJobdeskListeners() {
+    if (window.__pnJobdeskListenersInstalled) return;
+    window.__pnJobdeskListenersInstalled = true;
+    installPnHistoryAutoOpenListener();
+    installAutoOpenVisibilityListener();
+    attachAutoOpenScrollListeners();
+    installAutoOpenMutationObserver();
+    window.addEventListener(
+      'pagehide',
+      () => {
+        try {
+          mergeSeenClientJobsFromDom();
+          const lk = jdListPageKey();
+          flushAccumulatedClientJobIdsForListKey(lk, 'pagehide');
+          flushLastSeenTouchForListKey(lk, 'pagehide');
+          jdMergeLastLk = '';
+          sendRuntimeMessageSafe({ type: 'PN_FLUSH_JOBS_TAB_STATE' }, () => {});
+        } catch (_) {}
+      },
+      { capture: true }
+    );
+  }
 
-  document.addEventListener(
-    'pn-client-classified',
-    (e) => {
-      const card = e.detail?.card;
-      const k = card && dedupeKeyForCard(card);
-      if (k) enqueueClientJobForAutoOpenByKey(k);
-      scheduleAutoOpenAfterClientClassified();
-    },
-    false
-  );
+  /** Handlers Jobs (classify / scrape) : seulement sur pages classification. */
+  function tryInstallJobdeskAutoOpen() {
+    installAlwaysOnJobdeskListeners();
+    if (window.__pnJobdeskAutoopenInstalled) {
+      if (typeof isClassificationTargetPage === 'function' && isClassificationTargetPage()) {
+        jdEnsureListScrollRootListener('poll');
+      }
+      return true;
+    }
+    if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) {
+      return false;
+    }
+    window.__pnJobdeskAutoopenInstalled = true;
 
-  installPnHistoryAutoOpenListener();
-  installAutoOpenVisibilityListener();
-  attachAutoOpenScrollListeners();
-  installAutoOpenMutationObserver();
-  attachUserClickJobdeskScrape();
+    document.addEventListener(
+      'pn-client-classified',
+      (e) => {
+        const card = e.detail?.card;
+        const k = card && dedupeKeyForCard(card);
+        if (k) enqueueClientJobForAutoOpenByKey(k);
+        scheduleAutoOpenAfterClientClassified();
+      },
+      false
+    );
 
-  window.addEventListener(
-    'pagehide',
-    () => {
+    attachUserClickJobdeskScrape();
+    try {
+      pnSetPageStatus('idle', 'En attente');
+    } catch (_) {}
+
+    jdEnsureListScrollRootListener('init');
+    jdWakeAfterSpaPathChange('install-jobs');
+    return true;
+  }
+
+  installAlwaysOnJobdeskListeners();
+  tryInstallJobdeskAutoOpen();
+  // SPA feed → /jobs/* : réessayer l’install Jobs + kick
+  let __jdLastSpaPath = location.pathname + location.search;
+  setInterval(() => {
+    try {
+      const p = location.pathname + location.search;
+      const pathChanged = p !== __jdLastSpaPath;
+      if (pathChanged) __jdLastSpaPath = p;
+      const wasInstalled = !!window.__pnJobdeskAutoopenInstalled;
+      tryInstallJobdeskAutoOpen();
+      if (pathChanged && typeof isClassificationTargetPage === 'function' && isClassificationTargetPage()) {
+        jdWakeAfterSpaPathChange('path-poll');
+      } else if (!wasInstalled && window.__pnJobdeskAutoopenInstalled) {
+        jdWakeAfterSpaPathChange('first-install');
+      } else if (window.__pnJobdeskAutoopenInstalled) {
+        jdEnsureListScrollRootListener('poll');
+      }
+    } catch (_) {}
+  }, 900);
+  [500, 1500, 3500].forEach((ms) => {
+    setTimeout(() => {
       try {
-        mergeSeenClientJobsFromDom();
-        const lk = jdListPageKey();
-        flushAccumulatedClientJobIdsForListKey(lk, 'pagehide');
-        jdMergeLastLk = '';
-        sendRuntimeMessageSafe({ type: 'PN_FLUSH_JOBS_TAB_STATE' }, () => {});
+        tryInstallJobdeskAutoOpen();
       } catch (_) {}
-    },
-    { capture: true }
-  );
-
-  jdEnsureListScrollRootListener('init');
+    }, ms);
+  });
 })();

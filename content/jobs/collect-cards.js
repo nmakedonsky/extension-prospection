@@ -50,6 +50,10 @@ function collectJobCardsCollections() {
       } catch (_) {}
     }
   }
+  // Perf : le fallback ci-dessous force un layout (getBoundingClientRect) pour
+  // chaque lien d'offre trouvé. Ne l'exécuter que si les sélecteurs primaires
+  // n'ont rien donné, sinon il tournait à chaque tick pour rien.
+  if (cards.length) return cards;
 
   const vw = window.innerWidth || 1200;
   for (const root of roots) {

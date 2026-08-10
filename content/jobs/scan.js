@@ -33,7 +33,7 @@ function buildScanPayload() {
 
   const clientIds = [];
   try {
-    for (const w of querySelectorAllDeep(document, `[${DATA_PROCESSED}][${DATA_TYPE}="Client"]`)) {
+    for (const w of querySelectorAllDeep(document, pnAspirableJobCardsSelector())) {
       if (typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(w)) continue;
       const { jobUrl } = getJobInfoFromWrapper(w);
       const jid = getJobIdFromWrapper(w, jobUrl) || '';

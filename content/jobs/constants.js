@@ -11,6 +11,18 @@ const DATA_TYPE = 'data-pn-type';
 /** Carte : snapshot carte déjà envoyé (évite doublons saveJobOffer stage=card). */
 const DATA_JOB_CARD_SAVED = 'data-pn-job-card-saved';
 
+/**
+ * Employeurs aspirés (auto-open Jobdesk → saved_jobs).
+ * Client + SS2I : marché freelance majoritairement ESN / SS2I.
+ */
+function pnIsAspirableEmployerType(type) {
+  return type === 'Client' || type === 'SS2I';
+}
+
+/** Sélecteur cartes liste déjà classifiées et aspirables. */
+function pnAspirableJobCardsSelector() {
+  return `[${DATA_PROCESSED}][${DATA_TYPE}="Client"], [${DATA_PROCESSED}][${DATA_TYPE}="SS2I"]`;
+}
 const JOB_CARD_SELECTORS = [
   'div[componentkey^="job-card-component-ref-"]',
   'div[role="button"][componentkey^="job-card-component-ref-"]',

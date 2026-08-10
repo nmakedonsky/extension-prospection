@@ -1,12 +1,19 @@
 /**
- * Workflow liste jobs : ne démarre qu’après scroll complet (badges → clics Client → scrape).
- * Appelé uniquement depuis jobdesk-autoopen.js quand la liste est marquée « fully scrolled ».
+ * Workflow liste jobs — ordre strict :
+ * 1) scroll complet
+ * 2) classification + affichage de TOUS les badges visibles
+ * 3) puis seulement auto-open / scrape Client + SS2I (un par un)
  */
 
 let pnListWorkflowRunning = false;
 
+function pnSleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function pnRunListWorkflowAfterFullScroll(reason = '') {
   if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
+  if (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) return;
   if (typeof window.jdIsListWorkflowActive === 'function' && !window.jdIsListWorkflowActive()) return;
   if (pnListWorkflowRunning) return;
 
@@ -22,15 +29,49 @@ async function pnRunListWorkflowAfterFullScroll(reason = '') {
 
     if (typeof mergeSeenClientJobsFromDom === 'function') mergeSeenClientJobsFromDom();
 
-    if (typeof window.pnRunClassificationPassAfterScroll === 'function') {
-      classifyOk = (await window.pnRunClassificationPassAfterScroll()) !== false;
+    // Peindre tout de suite depuis le cache (avant le settle).
+    if (typeof window.pnRepaintVisibleBadgesFromCache === 'function') {
+      window.pnRepaintVisibleBadgesFromCache();
     }
 
-    if (classifyOk && typeof window.jdMarkCurrentListFullyScrolled === 'function') {
-      window.jdMarkCurrentListFullyScrolled(reason);
-    } else if (!classifyOk && typeof window.jdAbortListWorkflowGate === 'function') {
-      window.jdAbortListWorkflowGate('classify_failed');
+    // Étape 2a — classer (un partial n’arrête pas tout de suite : le gate badges retry)
+    if (typeof window.pnRunClassificationPassAfterScroll === 'function') {
+      classifyOk = (await window.pnRunClassificationPassAfterScroll({ settle: true })) !== false;
+    }
+
+    // Étape 2b — peindre / rattraper jusqu’à ce que les cartes classifiables aient un badge
+    let badgesReady = true;
+    if (typeof window.pnEnsureAllVisibleBadgesPainted === 'function') {
+      badgesReady = (await window.pnEnsureAllVisibleBadgesPainted({ maxRounds: 6 })) === true;
+    } else if (typeof window.pnRepaintVisibleBadgesFromCache === 'function') {
+      window.pnRepaintVisibleBadgesFromCache();
+    }
+
+    // Source de vérité = badges visibles, pas le 1er retour classify (retry dans ensure).
+    if (!badgesReady) {
+      if (typeof jdLog === 'function') {
+        jdLog('jd_wf', {
+          st: 'block_scrape',
+          r: 'badges_incomplete',
+          classifyOk: !!classifyOk
+        });
+      }
+      if (typeof window.jdAbortListWorkflowGate === 'function') {
+        window.jdAbortListWorkflowGate('badges_incomplete');
+      }
+      try {
+        if (typeof pnSetPageStatus === 'function') {
+          pnSetPageStatus('idle', 'Labels incomplets');
+        }
+      } catch (_) {}
       return;
+    }
+
+    // Laisse le DOM peindre avant de lancer les clics
+    await pnSleepMs(280);
+
+    if (typeof window.jdMarkCurrentListFullyScrolled === 'function') {
+      window.jdMarkCurrentListFullyScrolled(reason);
     }
 
     if (typeof pnTabVisibleForAutoOpen === 'function' && !pnTabVisibleForAutoOpen()) {
@@ -48,6 +89,7 @@ async function pnRunListWorkflowAfterFullScroll(reason = '') {
     }
     if (typeof lastAutoOpenRunAt !== 'undefined') lastAutoOpenRunAt = Date.now();
 
+    // Étape 3 — scrape (un Client à la fois)
     if (typeof tryAutoOpenNewVisibleClientJobs === 'function') {
       requestAutoOpenRun('full-scroll-ready');
     }

@@ -1,5 +1,55 @@
 /** Extraction nom société depuis une carte offre. */
 
+/** Texte visible uniquement (LinkedIn duplique souvent le titre en aria-hidden). */
+function pnVisibleTextFromEl(el) {
+  if (!el) return '';
+  try {
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll?.('[aria-hidden="true"]').forEach((n) => n.remove());
+    return String(clone.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } catch (_) {
+    return String(el.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+}
+
+/**
+ * LinkedIn Premium colle souvent le titre 2× sans séparateur :
+ * « Lead Data EngineerLead Data Engineer ».
+ */
+function pnCleanJobTitle(raw) {
+  let t = String(raw || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t) return '';
+  t = t
+    .replace(/\s*\(offre d['’]emploi vérifiée\)\s*/gi, ' ')
+    .replace(/\s*\(verified job(?: posting)?\)\s*/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Duplication exacte ABCABC
+  if (t.length >= 8 && t.length % 2 === 0) {
+    const half = t.length / 2;
+    if (t.slice(0, half) === t.slice(half)) return t.slice(0, half).trim();
+  }
+
+  // Duplication sans espace : TitleTitle (même si longueurs impaires après nettoyage)
+  const max = Math.min(Math.floor(t.length / 2), 160);
+  for (let len = max; len >= 10; len--) {
+    const a = t.slice(0, len);
+    const rest = t.slice(len);
+    if (!rest) continue;
+    if (rest === a || rest.startsWith(a)) return a.trim();
+    // 2e copie tronquée / sans suffixe vérifié
+    if (a.startsWith(rest) && rest.length >= 10) return a.trim();
+  }
+  return t.slice(0, 200);
+}
+
 function isNoiseCompanyText(t) {
   const s = String(t || '')
     .replace(/\s+/g, ' ')
@@ -40,8 +90,32 @@ function extractCompanyName(el) {
   if (!el) return '';
   const clone = el.cloneNode(true);
   clone.querySelectorAll?.('.pn-badge').forEach((n) => n.remove());
-  const text = clone.textContent?.trim() || '';
-  return text.replace(/\s+/g, ' ').trim();
+  clone.querySelectorAll?.('[aria-hidden="true"]').forEach((n) => n.remove());
+  let text = clone.textContent?.trim() || '';
+  text = text.replace(/\s+/g, ' ').trim();
+  // LinkedIn colle parfois « Société · Promoted / Verified » dans le même nœud.
+  text = text.replace(/\s*[·•|]\s*(?:Promoted|Sponsorisé|Verified|Certifié)\b.*$/i, '').trim();
+  text = text.replace(/\s*[·•]\s*$/g, '').trim();
+  // UI Premium capturée à tort comme nom société
+  if (/^afficher les infos premium$/i.test(text) || /^see premium insights$/i.test(text)) return '';
+  return text;
+}
+
+/** Clé cache tolérante (casse / accents) pour re-peindre après virtualisation. */
+function pnNormalizeCompanyKey(name) {
+  try {
+    return String(name || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  } catch (_) {
+    return String(name || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
 }
 
 /**

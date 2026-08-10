@@ -4,7 +4,7 @@
  * Lectures (présence jobs), LLM et autres actions hors Jobs restent immédiates.
  */
 
-/** @type {Map<number, { logs: { event: string, data: object, level: string }[], jobs: { jobOffer: object, dedupKey: string|null }[], pendingDedupKeys: Set<string> }>} */
+/** @type {Map<number, { logs: { event: string, data: object, level: string }[], jobs: { jobOffer: object, dedupKey: string|null }[], pendingDedupKeys: Set<string>, pendingTouchJobIds: Set<string> }>} */
 const PN_TAB_FLUSH_BUFFERS = new Map();
 
 const PN_MAX_BUFFERED_LOGS_PER_TAB = 600;
@@ -19,7 +19,12 @@ function pnTabFlushBucket(tabId, tabUrl) {
   if (typeof tabId !== 'number') return null;
   if (!pnIsLinkedInJobsTabUrl(tabUrl)) return null;
   if (!PN_TAB_FLUSH_BUFFERS.has(tabId)) {
-    PN_TAB_FLUSH_BUFFERS.set(tabId, { logs: [], jobs: [], pendingDedupKeys: new Set() });
+    PN_TAB_FLUSH_BUFFERS.set(tabId, {
+      logs: [],
+      jobs: [],
+      pendingDedupKeys: new Set(),
+      pendingTouchJobIds: new Set()
+    });
   }
   return PN_TAB_FLUSH_BUFFERS.get(tabId);
 }
@@ -75,12 +80,26 @@ function pnMergeBufferedJobDedupKeys(tabId, tabUrl, items, present) {
   return merged;
 }
 
+/**
+ * @returns {boolean} true si mis en tampon.
+ */
+function pnBufferTouchJobIdsForTab(tabId, tabUrl, linkedinJobIds) {
+  const b = pnTabFlushBucket(tabId, tabUrl);
+  if (!b) return false;
+  for (const id of linkedinJobIds || []) {
+    const s = String(id || '').trim();
+    if (s) b.pendingTouchJobIds.add(s);
+  }
+  return true;
+}
+
 async function pnFlushTabBuffer(tabId) {
   if (typeof tabId !== 'number') return;
   const b = PN_TAB_FLUSH_BUFFERS.get(tabId);
   if (!b) return;
   const logs = b.logs.slice();
   const jobs = b.jobs.slice();
+  const touchIds = Array.from(b.pendingTouchJobIds);
   PN_TAB_FLUSH_BUFFERS.delete(tabId);
   for (const row of logs) {
     await postExtensionLog(row.event, row.data, row.level).catch(() => {});
@@ -88,6 +107,11 @@ async function pnFlushTabBuffer(tabId) {
   for (const row of jobs) {
     try {
       await swSaveJobOffer(row.jobOffer);
+    } catch (_) {}
+  }
+  if (touchIds.length) {
+    try {
+      await swTouchSavedJobsLastSeenAt(touchIds);
     } catch (_) {}
   }
 }

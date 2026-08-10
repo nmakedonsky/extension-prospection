@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS saved_jobs (
   linkedin_data JSONB,
   first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  first_scraped_at TIMESTAMPTZ,
   details_scraped_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -42,6 +43,7 @@ ALTER TABLE saved_jobs
   ADD COLUMN IF NOT EXISTS linkedin_data JSONB,
   ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ DEFAULT now(),
   ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS first_scraped_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS details_scraped_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now(),
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
@@ -52,6 +54,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_jobs_job_url_unique
 
 CREATE INDEX IF NOT EXISTS idx_saved_jobs_company_name ON saved_jobs (company_name);
 CREATE INDEX IF NOT EXISTS idx_saved_jobs_last_seen_at ON saved_jobs (last_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_saved_jobs_first_scraped_at
+  ON saved_jobs (first_scraped_at DESC)
+  WHERE first_scraped_at IS NOT NULL;
+
+COMMENT ON COLUMN saved_jobs.first_scraped_at IS
+  'Premier scrape détail réussi. Figé — proxy du début de publication observé.';
+
+COMMENT ON COLUMN saved_jobs.last_seen_at IS
+  'Dernière visibilité sur une liste LinkedIn Jobs (scroll) ou scrape détail.';
+
+COMMENT ON COLUMN saved_jobs.first_seen_at IS
+  'Première apparition en liste (carte), avant aspiration complète.';
+
+COMMENT ON COLUMN saved_jobs.details_scraped_at IS
+  'Date du dernier scrape détail réussi (description à jour).';
 
 -- RLS (Row Level Security) : autoriser lecture/écriture avec la clé anon
 -- À activer si tu veux restreindre l’accès plus tard
@@ -121,6 +139,38 @@ COMMENT ON COLUMN saved_jobs.needs_rescrape IS
 
 -- À exécuter une fois après ajout de la colonne : marquer toutes les lignes déjà en base pour un passage auto.
 -- UPDATE saved_jobs SET needs_rescrape = true;
+
+-- Filtres Jobdesk : contrat / modalité / date dépôt / candidats
+ALTER TABLE saved_jobs
+  ADD COLUMN IF NOT EXISTS employment_type TEXT,
+  ADD COLUMN IF NOT EXISTS workplace_type TEXT,
+  ADD COLUMN IF NOT EXISTS posted_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS posted_text TEXT,
+  ADD COLUMN IF NOT EXISTS applicants_count INTEGER;
+
+COMMENT ON COLUMN saved_jobs.employment_type IS
+  'Type de contrat normalisé: cdi | cdd | freelance | internship | apprenticeship | temporary | part_time | full_time | other';
+COMMENT ON COLUMN saved_jobs.workplace_type IS
+  'Modalité normalisée: remote | hybrid | onsite | other';
+COMMENT ON COLUMN saved_jobs.posted_at IS
+  'Estimation date de publication LinkedIn (depuis « il y a X jours » / posted on).';
+COMMENT ON COLUMN saved_jobs.posted_text IS
+  'Libellé brut LinkedIn de la date de dépôt (ex. « il y a 5 jours »).';
+COMMENT ON COLUMN saved_jobs.applicants_count IS
+  'Nombre de candidats affiché (NULL si inconnu). « Moins de 10 » → 9 ; premiers candidats → 0.';
+
+CREATE INDEX IF NOT EXISTS idx_saved_jobs_employment_type
+  ON saved_jobs (employment_type)
+  WHERE employment_type IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_saved_jobs_workplace_type
+  ON saved_jobs (workplace_type)
+  WHERE workplace_type IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_saved_jobs_posted_at
+  ON saved_jobs (posted_at DESC)
+  WHERE posted_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_saved_jobs_applicants_count
+  ON saved_jobs (applicants_count)
+  WHERE applicants_count IS NOT NULL;
 
 -- Logs extension (diagnostic temps réel)
 CREATE TABLE IF NOT EXISTS extension_logs (

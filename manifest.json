@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Prospection",
-  "version": "0.5.11",
-  "description": "LinkedIn Jobs — badges SS2I / Client (Gemini), cache Supabase, HubSpot / SendPilot en option.",
+  "version": "0.5.63",
+  "description": "LinkedIn Jobs (Client+SS2I) + profils /in/ → Supabase, badges, HubSpot / SendPilot en option.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
     "https://www.linkedin.com/*",
@@ -20,12 +20,23 @@
   "background": {
     "service_worker": "background.js"
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["content/profiles/page-hook.js"],
+      "matches": ["https://www.linkedin.com/*", "https://*.linkedin.com/*"]
+    }
+  ],
   "content_scripts": [
     {
       "matches": [
-        "https://www.linkedin.com/jobs/*",
-        "https://linkedin.com/jobs/*",
-        "https://*.linkedin.com/jobs/*"
+        "https://www.linkedin.com/*",
+        "https://linkedin.com/*",
+        "https://*.linkedin.com/*"
+      ],
+      "exclude_matches": [
+        "https://www.linkedin.com/in/*",
+        "https://linkedin.com/in/*",
+        "https://*.linkedin.com/in/*"
       ],
       "js": [
         "content/jobs/constants.js",
@@ -56,6 +67,29 @@
       ],
       "css": ["content/content.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.linkedin.com/in/*",
+        "https://linkedin.com/in/*",
+        "https://*.linkedin.com/in/*"
+      ],
+      "js": ["content/profiles/page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.linkedin.com/in/*",
+        "https://linkedin.com/in/*",
+        "https://*.linkedin.com/in/*"
+      ],
+      "js": [
+        "content/profiles/inject-hook.js",
+        "content/profiles/profile-parse.js",
+        "content/profiles/profile-run.js"
+      ],
+      "run_at": "document_start"
     }
   ]
 }

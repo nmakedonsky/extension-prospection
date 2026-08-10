@@ -12,6 +12,7 @@ importScripts(
   'sw-company-summary.js',
   'sw-supabase-financial.js',
   'sw-supabase-jobs.js',
+  'sw-supabase-prospects.js',
   'sw-company-linkedin-url.js',
   'sw-tab-flush-buffers.js',
   'sw-financial.js',
@@ -808,6 +809,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'UPSERT_LINKEDIN_PROSPECT') {
+    const payload = msg.payload && typeof msg.payload === 'object' ? msg.payload : {};
+    upsertLinkedInProspectToSupabase(payload)
+      .then(async (r) => {
+        try {
+          await postExtensionLog(
+            r && r.ok ? 'prospect_upsert' : 'prospect_upsert_fail',
+            {
+              linkedin_url: r?.linkedin_url || payload.linkedin_url || null,
+              created: !!(r && r.created),
+              id: r?.id || null,
+              has_json: payload.linkedin_profile_json != null,
+              error: r?.error || null,
+              detail: r?.detail || null,
+              capture_from: payload.capture_from || null
+            },
+            r && r.ok ? 'info' : 'error'
+          );
+        } catch (_) {}
+        sendResponse(r);
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
+    return true;
+  }
+
   if (msg.type === 'EXTENSION_LOG') {
     const event = String(msg.event || '').trim().slice(0, 200);
     if (!event) {
@@ -825,10 +851,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     delete data.pageUrl;
     const payload = { ...data, pageUrl, tabId: sender?.tab?.id ?? null };
     const level = msg.level === 'warn' || msg.level === 'error' ? msg.level : 'info';
-    if (pnBufferExtensionLogForTab(sender?.tab?.id, sender?.tab?.url, event, payload, level)) {
-      sendResponse({ ok: true, buffered: true });
-      return true;
-    }
+    // Écriture immédiate (pas de tampon) : ces logs `jd_*` sont peu nombreux et
+    // indispensables pour diagnostiquer en direct le workflow Jobdesk (le tampon par
+    // onglet ne flush qu'au pagehide, ce qui les rendait invisibles pendant des heures).
     postExtensionLog(event, payload, level)
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
@@ -947,11 +972,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           typeof tabId === 'number'
             ? pnMergeBufferedJobDedupKeys(tabId, tabUrl, items, present)
             : present || {};
+        const idsToTouch = [];
+        for (const it of items) {
+          const dk = it?.dedupKey;
+          const jid = it?.linkedinJobId != null ? String(it.linkedinJobId).trim() : '';
+          if (dk && jid && merged[dk]) idsToTouch.push(jid);
+        }
+        if (idsToTouch.length && typeof tabId === 'number') {
+          pnBufferTouchJobIdsForTab(tabId, tabUrl, idsToTouch);
+        }
         sendResponse({ ok: true, present: merged });
       })
       .catch((err) =>
         sendResponse({ ok: false, error: err?.message || String(err), present: {} })
       );
+    return true;
+  }
+
+  if (msg.action === 'touchSavedJobsLastSeen') {
+    const ids = Array.isArray(msg.linkedinJobIds) ? msg.linkedinJobIds : [];
+    const tabId = sender?.tab?.id;
+    const tabUrl = sender?.tab?.url;
+    if (pnBufferTouchJobIdsForTab(tabId, tabUrl, ids)) {
+      sendResponse({ ok: true, buffered: true });
+      return true;
+    }
+    swTouchSavedJobsLastSeenAt(ids)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 

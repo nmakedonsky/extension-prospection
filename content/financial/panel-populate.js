@@ -9,9 +9,11 @@ function populateFinancialPanel(companyName, jobInfo = {}) {
 
   ensureFinancialDock();
   const body = getDockBody();
+  if (!body) return;
   body.querySelector('.lph-financial-dock__placeholder')?.remove();
 
   const card = getFinancialCardMount();
+  if (!card) return;
   card.classList.add('lph-financial-card--compact');
   while (card.firstChild) card.removeChild(card.firstChild);
 

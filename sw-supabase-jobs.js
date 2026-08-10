@@ -116,6 +116,16 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       needsRescrape = false;
     }
 
+    const seenNow = jobOffer?.seenAt || new Date().toISOString();
+    const scrapeNow = detailScrapeDone ? jobOffer?.detailsScrapedAt || seenNow : null;
+    const firstScrapedAt =
+      existingRow?.first_scraped_at || (detailScrapeDone ? scrapeNow : null);
+
+    const applicantsCount =
+      typeof jobOffer?.applicantsCount === 'number' && Number.isFinite(jobOffer.applicantsCount)
+        ? Math.max(0, Math.floor(jobOffer.applicantsCount))
+        : existingRow?.applicants_count ?? null;
+
     const payload = sanitizeForPostgres({
       linkedin_job_id: jobOffer?.linkedinJobId || existingRow?.linkedin_job_id || null,
       company_name: trimmedCompanyName || existingRow?.company_name || null,
@@ -123,12 +133,18 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       job_title: jobOffer?.jobTitle || existingRow?.job_title || null,
       job_url: jobOffer?.jobUrl || existingRow?.job_url || null,
       location: jobOffer?.location || existingRow?.location || null,
+      employment_type: jobOffer?.employmentType || existingRow?.employment_type || null,
+      workplace_type: jobOffer?.workplaceType || existingRow?.workplace_type || null,
+      posted_at: jobOffer?.postedAt || existingRow?.posted_at || null,
+      posted_text: jobOffer?.postedText || existingRow?.posted_text || null,
+      applicants_count: applicantsCount,
       description_text: jobOffer?.descriptionText || existingRow?.description_text || null,
       source: jobOffer?.source || existingRow?.source || 'linkedin_jobs',
       linkedin_data: mergedLinkedinData,
-      first_seen_at: existingRow?.first_seen_at || jobOffer?.seenAt || new Date().toISOString(),
-      last_seen_at: jobOffer?.seenAt || new Date().toISOString(),
-      details_scraped_at: jobOffer?.detailsScrapedAt || existingRow?.details_scraped_at || null,
+      first_seen_at: existingRow?.first_seen_at || seenNow,
+      first_scraped_at: firstScrapedAt,
+      last_seen_at: seenNow,
+      details_scraped_at: scrapeNow || existingRow?.details_scraped_at || null,
       needs_rescrape: needsRescrape,
       updated_at: new Date().toISOString()
     });
@@ -299,4 +315,57 @@ async function swCheckSavedJobsPresenceInSupabase(items) {
     } catch (_) {}
   }
   return out;
+}
+
+const SW_TOUCH_LAST_SEEN_CHUNK = 50;
+
+/**
+ * Met à jour last_seen_at (dernière vue LinkedIn) sans toucher first_scraped_at.
+ * @param {string[]} linkedinJobIds
+ * @returns {Promise<{ ok: boolean, skipped?: boolean, error?: string }>}
+ */
+async function swTouchSavedJobsLastSeenAt(linkedinJobIds) {
+  const ids = [
+    ...new Set(
+      (linkedinJobIds || [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean)
+    )
+  ];
+  if (!ids.length) return { ok: true };
+
+  const config = await loadConfig();
+  const baseUrl = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
+  const key = String(config.supabaseAnonKey || '').trim();
+  if (!baseUrl || !key) return { ok: false, skipped: true };
+
+  const now = new Date().toISOString();
+  const headers = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    Prefer: 'return=minimal'
+  };
+
+  try {
+    for (let i = 0; i < ids.length; i += SW_TOUCH_LAST_SEEN_CHUNK) {
+      const chunk = ids.slice(i, i + SW_TOUCH_LAST_SEEN_CHUNK);
+      const inList = chunk.map((id) => encodeURIComponent(id)).join(',');
+      const res = await fetch(
+        `${baseUrl}/rest/v1/${SW_SUPABASE_JOBS_TABLE}?linkedin_job_id=in.(${inList})`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ last_seen_at: now, updated_at: now })
+        }
+      );
+      if (!res.ok) {
+        const text = await res.text();
+        return { ok: false, error: `touch ${res.status}: ${text.slice(0, 200)}` };
+      }
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
 }
