@@ -89,6 +89,63 @@ function rememberCompanyTypeInMemory(companyName, type) {
   }
 }
 
+/** Cache RAM session — légitimité (lecture seule depuis Supabase). */
+const memoryCompaniesLegitimacy = new Map();
+const LEGITIMACY_VERDICTS = new Set(['real', 'recruiter', 'shell', 'uncertain']);
+
+function rememberCompanyLegitimacyInMemory(companyName, info) {
+  const n = String(companyName || '').trim();
+  if (!n || !info || typeof info !== 'object') return;
+  const verdict = String(info.verdict || '').trim().toLowerCase();
+  if (!LEGITIMACY_VERDICTS.has(verdict)) return;
+  memoryCompaniesLegitimacy.set(n, {
+    verdict,
+    india_bodyshop: !!info.india_bodyshop,
+    confidence: info.confidence ?? null,
+    payload: info.payload && typeof info.payload === 'object' ? info.payload : null,
+    at: info.at || null
+  });
+  while (memoryCompaniesLegitimacy.size > COMPANIES_MEMORY_MAX_ENTRIES) {
+    const oldest = memoryCompaniesLegitimacy.keys().next().value;
+    if (oldest != null) memoryCompaniesLegitimacy.delete(oldest);
+  }
+}
+
+/**
+ * @param {string[]} companyNames
+ * @returns {Promise<Record<string, object>>}
+ */
+async function getCompaniesLegitimacyBatch(companyNames) {
+  const unique = [
+    ...new Set(
+      (companyNames || [])
+        .map((n) => String(n || '').trim())
+        .filter((n) => n.length >= 2)
+    )
+  ];
+  const out = {};
+  if (!unique.length) return out;
+
+  const needDb = [];
+  for (const n of unique) {
+    const mem = memoryCompaniesLegitimacy.get(n);
+    if (mem && LEGITIMACY_VERDICTS.has(mem.verdict)) {
+      out[n] = mem;
+    } else {
+      needDb.push(n);
+    }
+  }
+
+  if (needDb.length) {
+    const fromDb = await getCompaniesFromSupabaseBatch(needDb);
+    for (const [n, info] of Object.entries(fromDb.legitimacy || {})) {
+      rememberCompanyLegitimacyInMemory(n, info);
+      out[n] = info;
+    }
+  }
+  return out;
+}
+
 try {
   chrome.storage.local.remove('prospectionCompaniesCache');
 } catch (_) {}
@@ -351,15 +408,31 @@ function quoteSupabaseInValue(value) {
 
 async function getCompanyFromSupabase(companyName) {
   const batch = await getCompaniesFromSupabaseBatch([companyName]);
-  return batch[companyName] || null;
+  return batch.types?.[companyName] || null;
+}
+
+function legitimacyInfoFromCompanyRow(row) {
+  const verdict = String(row?.legitimacy_verdict || '')
+    .trim()
+    .toLowerCase();
+  if (!LEGITIMACY_VERDICTS.has(verdict) || !row?.legitimacy_at) return null;
+  return {
+    verdict,
+    india_bodyshop: !!row.legitimacy_india_bodyshop,
+    confidence: row.legitimacy_confidence ?? null,
+    payload: row.legitimacy_payload && typeof row.legitimacy_payload === 'object' ? row.legitimacy_payload : null,
+    at: row.legitimacy_at || null
+  };
 }
 
 /**
+ * Un seul SELECT : type Client/SS2I + légitimité (si déjà backfillée).
  * @param {string[]} companyNames
- * @returns {Promise<Record<string, 'Client'|'SS2I'>>}
+ * @returns {Promise<{ types: Record<string, 'Client'|'SS2I'>, legitimacy: Record<string, object> }>}
  */
 async function getCompaniesFromSupabaseBatch(companyNames) {
-  const out = {};
+  const types = {};
+  const legitimacy = {};
   const names = [
     ...new Set(
       (companyNames || [])
@@ -367,12 +440,12 @@ async function getCompaniesFromSupabaseBatch(companyNames) {
         .filter((n) => n.length >= 2)
     )
   ];
-  if (!names.length) return out;
+  if (!names.length) return { types, legitimacy };
 
   const config = await loadConfig();
   const url = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
   const key = String(config.supabaseAnonKey || '').trim();
-  if (!url || !key) return out;
+  if (!url || !key) return { types, legitimacy };
 
   const headers = {
     apikey: key,
@@ -385,7 +458,7 @@ async function getCompaniesFromSupabaseBatch(companyNames) {
     const inList = chunk.map(quoteSupabaseInValue).join(',');
     try {
       const res = await fetch(
-        `${url}/rest/v1/${SUPABASE_COMPANIES_TABLE}?company_name=in.(${inList})&select=company_name,type`,
+        `${url}/rest/v1/${SUPABASE_COMPANIES_TABLE}?company_name=in.(${inList})&select=company_name,type,legitimacy_verdict,legitimacy_india_bodyshop,legitimacy_confidence,legitimacy_payload,legitimacy_at`,
         { method: 'GET', headers }
       );
       if (!res.ok) continue;
@@ -393,12 +466,15 @@ async function getCompaniesFromSupabaseBatch(companyNames) {
       if (!Array.isArray(rows)) continue;
       for (const row of rows) {
         const n = String(row?.company_name || '').trim();
+        if (!n) continue;
         const t = row?.type;
-        if (n && (t === 'Client' || t === 'SS2I')) out[n] = t;
+        if (t === 'Client' || t === 'SS2I') types[n] = t;
+        const legit = legitimacyInfoFromCompanyRow(row);
+        if (legit) legitimacy[n] = legit;
       }
     } catch (_) {}
   }
-  return out;
+  return { types, legitimacy };
 }
 
 async function upsertCompanyToSupabase(companyName, type) {
@@ -501,7 +577,7 @@ async function getOrClassifyCompany(companyName) {
 
 /**
  * @param {string[]} companyNames
- * @returns {Promise<Record<string, 'Client'|'SS2I'|null>>}
+ * @returns {Promise<{ types: Record<string, 'Client'|'SS2I'|null>, legitimacy: Record<string, object> }>}
  */
 async function classifyCompaniesBatch(companyNames) {
   const unique = [
@@ -511,53 +587,62 @@ async function classifyCompaniesBatch(companyNames) {
         .filter((n) => n.length >= 2)
     )
   ];
-  const out = {};
-  if (!unique.length) return out;
+  const typesOut = {};
+  const legitimacyOut = {};
+  if (!unique.length) return { types: typesOut, legitimacy: legitimacyOut };
 
   const needDb = [];
   for (const n of unique) {
-    const mem = memoryCompaniesType.get(n);
-    if (mem === 'Client' || mem === 'SS2I') {
-      out[n] = mem;
-    } else {
+    const memType = memoryCompaniesType.get(n);
+    if (memType === 'Client' || memType === 'SS2I') typesOut[n] = memType;
+    const memLegit = memoryCompaniesLegitimacy.get(n);
+    if (memLegit && LEGITIMACY_VERDICTS.has(memLegit.verdict)) {
+      legitimacyOut[n] = memLegit;
+    }
+    // Un round-trip Supabase si type OU légitimité manquent.
+    if (!(memType === 'Client' || memType === 'SS2I') || !legitimacyOut[n]) {
       needDb.push(n);
     }
   }
 
   if (needDb.length) {
     const fromDb = await getCompaniesFromSupabaseBatch(needDb);
-    for (const [n, t] of Object.entries(fromDb)) {
+    for (const [n, t] of Object.entries(fromDb.types || {})) {
       rememberCompanyTypeInMemory(n, t);
-      out[n] = t;
+      typesOut[n] = t;
       void logToSupabase('company_classified', {
         company_name: n.slice(0, 120),
         type: t,
         via: 'supabase'
       });
     }
-  }
-
-  const needGemini = unique.filter((n) => !out[n]);
-  if (!needGemini.length) return out;
-
-  const concurrency = 3;
-  let nextIdx = 0;
-  async function worker() {
-    while (true) {
-      const idx = nextIdx++;
-      if (idx >= needGemini.length) return;
-      const n = needGemini[idx];
-      const type = await classifyWithGeminiAndPersist(n);
-      if (type) out[n] = type;
+    for (const [n, info] of Object.entries(fromDb.legitimacy || {})) {
+      rememberCompanyLegitimacyInMemory(n, info);
+      legitimacyOut[n] = info;
     }
   }
-  const nWorkers = Math.min(concurrency, needGemini.length);
-  await Promise.all(Array.from({ length: nWorkers }, () => worker()));
+
+  const needGemini = unique.filter((n) => !typesOut[n]);
+  if (needGemini.length) {
+    const concurrency = 3;
+    let nextIdx = 0;
+    async function worker() {
+      while (true) {
+        const idx = nextIdx++;
+        if (idx >= needGemini.length) return;
+        const n = needGemini[idx];
+        const type = await classifyWithGeminiAndPersist(n);
+        if (type) typesOut[n] = type;
+      }
+    }
+    const nWorkers = Math.min(concurrency, needGemini.length);
+    await Promise.all(Array.from({ length: nWorkers }, () => worker()));
+  }
 
   for (const n of unique) {
-    if (!(n in out)) out[n] = null;
+    if (!(n in typesOut)) typesOut[n] = null;
   }
-  return out;
+  return { types: typesOut, legitimacy: legitimacyOut };
 }
 
 function sanitizeJsonValue(value, depth = 0) {
@@ -804,7 +889,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'CLASSIFY_COMPANIES_BATCH') {
     const names = Array.isArray(msg.companyNames) ? msg.companyNames : [];
     classifyCompaniesBatch(names)
-      .then((types) => sendResponse(types))
+      .then((payload) => sendResponse(payload && typeof payload === 'object' ? payload : { types: {}, legitimacy: {} }))
+      .catch(() => sendResponse({ types: {}, legitimacy: {} }));
+    return true;
+  }
+
+  if (msg.type === 'LEGITIMACY_COMPANIES_BATCH') {
+    const names = Array.isArray(msg.companyNames) ? msg.companyNames : [];
+    getCompaniesLegitimacyBatch(names)
+      .then((map) => sendResponse(map))
       .catch(() => sendResponse({}));
     return true;
   }

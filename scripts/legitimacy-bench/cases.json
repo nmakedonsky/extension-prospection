@@ -1,0 +1,210 @@
+{
+  "version": 1,
+  "notes": "Labels a priori, ajustés après le 1er run (plusieurs « shell » étaient des cabinets enregistrés). real = employeur réel ; recruiter = cabinet / marketplace / harvest ; shell = coquille sans entité identifiable. india_bodyshop_pattern = petite boutique IN qui poste des rôles EU — PAS un ban des majors indiens.",
+  "cases": [
+    {
+      "id": "hopper",
+      "company_name": "Hopper",
+      "job_title": "Lead, Finance Analytics & Enablement AI/ML",
+      "job_location": "Remote / Canada",
+      "expected_verdict": "real",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "pictet",
+      "company_name": "Pictet Group",
+      "job_title": "Risk & Compliance Analytics Engineer",
+      "job_location": "Geneva",
+      "expected_verdict": "real",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "thales",
+      "company_name": "Thales",
+      "job_title": "Data Engineer",
+      "job_location": "France",
+      "expected_verdict": "real",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "ovh",
+      "company_name": "OVHcloud",
+      "job_title": "Data Engineer",
+      "job_location": "France",
+      "expected_verdict": "real",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "infosys",
+      "company_name": "Infosys",
+      "job_title": "Data Engineer",
+      "job_location": "Europe",
+      "expected_verdict": "real",
+      "expected_india_bodyshop": false,
+      "notes": "Vrai groupe IN — ne doit PAS être shell / bodyshop mill"
+    },
+    {
+      "id": "hcl",
+      "company_name": "HCLTech",
+      "job_title": "Data Engineer",
+      "job_location": "Europe",
+      "expected_verdict": "real",
+      "expected_india_bodyshop": false,
+      "notes": "Vrai groupe IN"
+    },
+    {
+      "id": "hays",
+      "company_name": "Hays",
+      "job_title": "Business Intelligence Engineer Freelance",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "triotech",
+      "company_name": "TrioTech Recruitment",
+      "job_title": "Data and AI Architect - Remote Freelance EU ONLY",
+      "job_location": "EU Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "robsonbale",
+      "company_name": "Robson Bale",
+      "job_title": "Databricks Expert",
+      "job_location": "UK / EU",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "jobgether",
+      "company_name": "Jobgether",
+      "job_title": "BI Reporting Analyst",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "kicklox",
+      "company_name": "Kicklox",
+      "job_title": "Data Engineer Freelance",
+      "job_location": "France",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "lafosse",
+      "company_name": "La Fosse",
+      "job_title": "Data Architect",
+      "job_location": "UK",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "alignerr",
+      "company_name": "Alignerr",
+      "job_title": "Clinical Business Intelligence Manager",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false,
+      "notes": "Marketplace AI / harvest de freelances, pas une coquille vide"
+    },
+    {
+      "id": "mercor",
+      "company_name": "Mercor",
+      "job_title": "Data Expert",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "yoit",
+      "company_name": "YO IT Consulting",
+      "job_title": "Data Engineer",
+      "job_location": "Europe Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": true
+    },
+    {
+      "id": "hirefeed",
+      "company_name": "Hire Feed",
+      "job_title": "Data Engineer",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "enzo",
+      "company_name": "Enzo Tech Group",
+      "job_title": "Data Engineer",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "techclover",
+      "company_name": "TechClover",
+      "job_title": "Data Engineer",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false,
+      "notes": "Agence emploi Singapour, pas une coquille vide"
+    },
+    {
+      "id": "tenx",
+      "company_name": "10x.Team",
+      "job_title": "Data Engineer",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "crossing",
+      "company_name": "Crossing Hurdles",
+      "job_title": "AI Data Specialist",
+      "job_location": "Remote",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false
+    },
+    {
+      "id": "silverlink",
+      "company_name": "Silverlink Technologies",
+      "job_title": "IT Consultant / Contract staffing",
+      "job_location": "UK / Europe",
+      "linkedin_company_url": "https://www.linkedin.com/company/silverlink-technologies/",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": true,
+      "notes": "HQ Mumbai, staffing onsite/offshore, adresse UK = Regus Harrow"
+    },
+    {
+      "id": "ubique",
+      "company_name": "Ubique Systems",
+      "job_title": "IT Staffing / Consultant",
+      "job_location": "UK / Europe",
+      "linkedin_company_url": "https://www.linkedin.com/company/ubique-systems/",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": true,
+      "notes": "LinkedIn HQ London + bureau Kolkata, specialties IT Recruitment / Staffing"
+    },
+    {
+      "id": "synapri",
+      "company_name": "Synapri",
+      "job_title": "Data / Salesforce Contract",
+      "job_location": "UK / Remote",
+      "linkedin_company_url": "https://www.linkedin.com/company/synaprirecruitment/",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": false,
+      "notes": "Staffing and Recruiting London, Salesforce/tech recruitment — cabinet UK, pas bodyshop IN"
+    },
+    {
+      "id": "sansaone",
+      "company_name": "Sansaone",
+      "job_title": "Enterprise Architect / IT contract",
+      "job_location": "Brussels / Belgium",
+      "linkedin_company_url": "https://www.linkedin.com/company/sansaone/",
+      "expected_verdict": "recruiter",
+      "expected_india_bodyshop": true,
+      "notes": "LinkedIn: ICT talent acquisition, Brussels 2023, équipe noms IN, contrats BE — pattern à vérifier"
+    }
+  ]
+}

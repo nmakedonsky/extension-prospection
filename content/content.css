@@ -1,14 +1,20 @@
 /* Badges SS2I / Client (liste gauche) */
 
 [class*='artdeco-entity-lockup__subtitle'] .pn-badge,
-[class*='company-name'] .pn-badge {
+[class*='artdeco-entity-lockup__subtitle'] .pn-legit,
+[class*='company-name'] .pn-badge,
+[class*='company-name'] .pn-legit {
   margin-left: 6px;
 }
 
 html.pn-path-jobs-search-results [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-badge),
+html.pn-path-jobs-search-results [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-legit),
 html.pn-path-jobs-search-results [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-badge),
+html.pn-path-jobs-search-results [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-legit),
 html.pn-path-jobs-collections [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-badge),
-html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-badge) {
+html.pn-path-jobs-collections [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-legit),
+html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-badge),
+html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p:has(> .pn-legit) {
   display: inline-flex !important;
   flex-wrap: wrap;
   align-items: center;
@@ -19,17 +25,25 @@ html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[comp
 }
 
 html.pn-path-jobs-search-results [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p > .pn-badge,
+html.pn-path-jobs-search-results [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p > .pn-legit,
 html.pn-path-jobs-search-results [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p > .pn-badge,
+html.pn-path-jobs-search-results [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p > .pn-legit,
 html.pn-path-jobs-collections [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p > .pn-badge,
-html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p > .pn-badge {
+html.pn-path-jobs-collections [data-testid='lazy-column'] div[componentkey^='job-card-component-ref-'] p > .pn-legit,
+html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p > .pn-badge,
+html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[componentkey^='job-card-component-ref-'] p > .pn-legit {
   margin-left: 0;
   flex-shrink: 0;
 }
 
 [class*='scaffold-layout__detail'] .pn-badge,
+[class*='scaffold-layout__detail'] .pn-legit,
 [class*='jobs-search__job-details'] .pn-badge,
+[class*='jobs-search__job-details'] .pn-legit,
 [componentkey^='JobDetails'] .pn-badge,
-[componentkey*='JobDetails_'] .pn-badge {
+[componentkey^='JobDetails'] .pn-legit,
+[componentkey*='JobDetails_'] .pn-badge,
+[componentkey*='JobDetails_'] .pn-legit {
   display: none !important;
 }
 
@@ -62,6 +76,34 @@ html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[comp
   background-color: #e2e3e5;
   color: #383d41;
   border: 1px solid #d6d8db;
+}
+
+/* Pastille légitimité (vert / orange / rouge) — tooltip natif via title */
+.pn-legit {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  vertical-align: middle;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  cursor: help;
+}
+
+.pn-legit--real {
+  background-color: #2e7d32;
+  border-color: #1b5e20;
+}
+
+.pn-legit--warn {
+  background-color: #ef6c00;
+  border-color: #e65100;
+}
+
+.pn-legit--shell {
+  background-color: #c62828;
+  border-color: #b71c1c;
 }
 
 /* Panneau gauche financier.

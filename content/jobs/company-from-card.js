@@ -90,6 +90,7 @@ function extractCompanyName(el) {
   if (!el) return '';
   const clone = el.cloneNode(true);
   clone.querySelectorAll?.('.pn-badge').forEach((n) => n.remove());
+  clone.querySelectorAll?.('.pn-legit').forEach((n) => n.remove());
   clone.querySelectorAll?.('[aria-hidden="true"]').forEach((n) => n.remove());
   let text = clone.textContent?.trim() || '';
   text = text.replace(/\s+/g, ' ').trim();

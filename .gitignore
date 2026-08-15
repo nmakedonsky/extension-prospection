@@ -4,3 +4,8 @@
 *.local
 # Clés locales pour dev (copie de local-config.example.js)
 local-config.js
+
+# Sortie locale du banc d'essai légitimité (peut être régénérée)
+scripts/legitimacy-bench/last-run.json
+scripts/legitimacy-bench/last-backfill.json
+scripts/legitimacy-bench/backfill-run.log

@@ -6,6 +6,48 @@
 const SW_SUPABASE_JOBS_TABLE = 'saved_jobs';
 
 function swMergeLinkedinData(existingData, incomingData) {
+  const existingDetails = (existingData && existingData.details) || {};
+  const incomingDetails = (incomingData && incomingData.details) || {};
+  const details = {
+    ...existingDetails,
+    ...incomingDetails
+  };
+  // Ne jamais écraser un enrichissement déjà capturé par une absence (null / manquant).
+  if (incomingDetails.hiringContact) details.hiringContact = incomingDetails.hiringContact;
+  else if (existingDetails.hiringContact) details.hiringContact = existingDetails.hiringContact;
+  else delete details.hiringContact;
+
+  if (incomingDetails.premiumApplicantInsights) {
+    details.premiumApplicantInsights = incomingDetails.premiumApplicantInsights;
+  } else if (existingDetails.premiumApplicantInsights) {
+    details.premiumApplicantInsights = existingDetails.premiumApplicantInsights;
+  } else {
+    delete details.premiumApplicantInsights;
+  }
+
+  if (incomingDetails.premiumCompanyInsights) {
+    details.premiumCompanyInsights = incomingDetails.premiumCompanyInsights;
+  } else if (existingDetails.premiumCompanyInsights) {
+    details.premiumCompanyInsights = existingDetails.premiumCompanyInsights;
+  } else {
+    delete details.premiumCompanyInsights;
+  }
+
+  // Bouclier verified : une fois true, ne pas rétrograder sur un scrape partiel.
+  const incomingVerified = incomingDetails.verifiedJob;
+  const existingVerified = existingDetails.verifiedJob;
+  if (incomingVerified?.verified === true) {
+    details.verifiedJob = incomingVerified;
+  } else if (existingVerified?.verified === true) {
+    details.verifiedJob = existingVerified;
+  } else if (incomingVerified) {
+    details.verifiedJob = incomingVerified;
+  } else if (existingVerified) {
+    details.verifiedJob = existingVerified;
+  } else {
+    delete details.verifiedJob;
+  }
+
   return sanitizeForPostgres({
     ...(existingData || {}),
     ...(incomingData || {}),
@@ -13,10 +55,7 @@ function swMergeLinkedinData(existingData, incomingData) {
       ...((existingData && existingData.card) || {}),
       ...((incomingData && incomingData.card) || {})
     },
-    details: {
-      ...((existingData && existingData.details) || {}),
-      ...((incomingData && incomingData.details) || {})
-    }
+    details
   });
 }
 
@@ -98,12 +137,22 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       }
     }
 
+    let premiumInsightsPromote = null;
+    if (detailScrapeDone && typeof swUpsertCompanyPremiumInsightsFromJob === 'function') {
+      premiumInsightsPromote = await swUpsertCompanyPremiumInsightsFromJob(jobOffer, detectedType);
+      if (premiumInsightsPromote?.ok) {
+        try {
+          console.info('[Prospection BG] linkedin_premium_insights', trimmedCompanyName, premiumInsightsPromote.mode);
+        } catch (_) {}
+      }
+    }
+
     const companyRowHandled =
       linkedinPromote?.ok &&
       (linkedinPromote.mode === 'created' ||
         linkedinPromote.mode === 'initialized' ||
         linkedinPromote.mode === 'frozen');
-    if (detectedType && !companyRowHandled) {
+    if (detectedType && !companyRowHandled && !premiumInsightsPromote?.ok) {
       await upsertCompanyToSupabase(trimmedCompanyName, detectedType);
     }
 
@@ -126,6 +175,19 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
         ? Math.max(0, Math.floor(jobOffer.applicantsCount))
         : existingRow?.applicants_count ?? null;
 
+    const incomingVerifiedFlag =
+      jobOffer?.linkedinVerified === true ||
+      jobOffer?.linkedinData?.details?.verifiedJob?.verified === true ||
+      jobOffer?.linkedinData?.card?.linkedinVerified === true ||
+      jobOffer?.cardData?.linkedinVerified === true;
+    const linkedinVerified = incomingVerifiedFlag
+      ? true
+      : existingRow?.linkedin_verified === true
+        ? true
+        : typeof jobOffer?.linkedinVerified === 'boolean'
+          ? jobOffer.linkedinVerified
+          : existingRow?.linkedin_verified ?? null;
+
     const payload = sanitizeForPostgres({
       linkedin_job_id: jobOffer?.linkedinJobId || existingRow?.linkedin_job_id || null,
       company_name: trimmedCompanyName || existingRow?.company_name || null,
@@ -138,6 +200,7 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       posted_at: jobOffer?.postedAt || existingRow?.posted_at || null,
       posted_text: jobOffer?.postedText || existingRow?.posted_text || null,
       applicants_count: applicantsCount,
+      linkedin_verified: linkedinVerified,
       description_text: jobOffer?.descriptionText || existingRow?.description_text || null,
       source: jobOffer?.source || existingRow?.source || 'linkedin_jobs',
       linkedin_data: mergedLinkedinData,
@@ -159,7 +222,7 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
         }
       );
       if (patchRes.ok) {
-        return { ok: true, mode: 'patch', linkedinPromote };
+        return { ok: true, mode: 'patch', linkedinPromote, premiumInsightsPromote };
       }
       const text = await patchRes.text();
       return { ok: false, error: `patch ${patchRes.status}: ${text.slice(0, 200)}` };
@@ -170,7 +233,7 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
       headers,
       body: JSON.stringify(payload)
     });
-    if (insertRes.ok) return { ok: true, mode: 'insert', linkedinPromote };
+    if (insertRes.ok) return { ok: true, mode: 'insert', linkedinPromote, premiumInsightsPromote };
     const insertText = await insertRes.text();
     if (swIsDuplicateConstraintError(insertText)) {
       const recoveredLookup = swBuildJobLookupClauses(jobOffer, payload);
@@ -184,7 +247,9 @@ async function swUpsertJobOfferToSupabase(jobOffer) {
             body: JSON.stringify(payload)
           }
         );
-        if (retryPatchRes.ok) return { ok: true, mode: 'insert-duplicate-recovered', linkedinPromote };
+        if (retryPatchRes.ok) {
+          return { ok: true, mode: 'insert-duplicate-recovered', linkedinPromote, premiumInsightsPromote };
+        }
         const retryText = await retryPatchRes.text();
         return { ok: false, error: `patch-after-duplicate ${retryPatchRes.status}: ${retryText.slice(0, 200)}` };
       }

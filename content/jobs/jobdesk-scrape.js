@@ -16,6 +16,12 @@ const JOB_SCRAPE_FULL_DESCRIPTION_TARGET = 900;
 const JOB_SCRAPE_INSIGHT_MIN_ABOUT_LEN = 80;
 /** Deux polls stables consécutifs avec le même encart entreprise (évite texte partiel). */
 const JOB_SCRAPE_INSIGHT_STABLE_POLLS = 2;
+/**
+ * Après description + métadonnées OK : attendre encore un peu que contact / Premium
+ * hydratent (lazy scroll). Au-delà → sauver sans bloquer l’auto-open.
+ */
+const JOB_SCRAPE_ENRICH_GRACE_MS = 6500;
+const JOB_SCRAPE_ENRICH_ABS_SOFT_MS = 12000;
 
 /** Libellé d’expansion de description (pas « Plus d’options » / aide / intérêt entreprise). */
 function jdIsDescExpandLabel(raw) {
@@ -796,6 +802,441 @@ function getCompanyNameFromJobWrapper(wrapper) {
   return extractCompanyName(companyEl);
 }
 
+function jdNormalizeHiringProfileUrl(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return null;
+  if (!s.startsWith('http')) {
+    s = s.startsWith('/') ? `https://www.linkedin.com${s}` : `https://www.linkedin.com/${s}`;
+  }
+  try {
+    const u = new URL(s);
+    const host = u.hostname.replace(/^www\./i, '');
+    if (!/linkedin\.com$/i.test(host) && !/\.linkedin\.com$/i.test(u.hostname)) return null;
+    const m = u.pathname.match(/\/in\/([^/]+)\/?/i);
+    if (!m) return null;
+    const slug = decodeURIComponent(m[1]).replace(/\/+$/, '');
+    if (!slug || /^(me|overlay|edit)$/i.test(slug)) return null;
+    return `https://www.linkedin.com/in/${slug}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function jdParseHiringContactName(raw) {
+  const fullName = pnNormalizeText(raw);
+  if (!fullName || fullName.length < 2 || fullName.length > 80) {
+    return { fullName: null, firstName: null, lastName: null };
+  }
+  const parts = fullName.split(' ').filter(Boolean);
+  return {
+    fullName,
+    firstName: parts[0] || null,
+    lastName: parts.length > 1 ? parts.slice(1).join(' ') : null
+  };
+}
+
+function jdHiringContactFromAnchor(anchor) {
+  const profileUrl = jdNormalizeHiringProfileUrl(anchor?.getAttribute?.('href') || anchor?.href || '');
+  if (!profileUrl) return null;
+  const lines = String(anchor.innerText || anchor.textContent || '')
+    .split('\n')
+    .map((l) => pnNormalizeText(l))
+    .filter(Boolean);
+  const nameLine = lines.find(
+    (l) =>
+      l.length >= 2 &&
+      l.length <= 80 &&
+      !/^•/.test(l) &&
+      !/^\d+[eè]?\b/i.test(l) &&
+      !/auteur de l[’']offre|job poster|hiring (team|manager)|envoyer un message|send (a )?message|voir le profil|see profile|message|connect|suivre|follow/i.test(
+        l
+      )
+  );
+  const roleLabel =
+    lines.find((l) => /auteur de l[’']offre|job poster|hiring manager|recruteur|recruiter/i.test(l)) || null;
+  const parsed = jdParseHiringContactName(nameLine || '');
+  return {
+    profileUrl,
+    fullName: parsed.fullName,
+    firstName: parsed.firstName,
+    lastName: parsed.lastName,
+    roleLabel
+  };
+}
+
+function jdQueryAll(root, selector) {
+  if (!root) return [];
+  try {
+    if (typeof querySelectorAllDeep === 'function') return querySelectorAllDeep(root, selector);
+    return Array.from(root.querySelectorAll(selector));
+  } catch (_) {
+    return [];
+  }
+}
+
+const JD_HIRING_HEADING_RE =
+  /personnes que vous pouvez contacter|rencontr(ez|er) l[’']équipe de recrutement|meet the hiring team|people you can reach|people you can contact/i;
+
+function jdFindHiringContactRoots(panel) {
+  const roots = [];
+  const seen = new Set();
+  const push = (el) => {
+    if (!el || seen.has(el)) return;
+    seen.add(el);
+    roots.push(el);
+  };
+  const scopes = [panel, document].filter(Boolean);
+  for (const scope of scopes) {
+    for (const el of jdQueryAll(
+      scope,
+      '[data-sdui-component*="peopleWhoCanHelp"], [class*="jobs-poster"], [class*="hirer-card"]'
+    )) {
+      push(el);
+    }
+    if (roots.length) break;
+  }
+  if (roots.length) return roots;
+  const headingScope =
+    panel ||
+    document.querySelector?.('[class*="scaffold-layout__detail"], [class*="jobs-details"]') ||
+    null;
+  if (!headingScope) return roots;
+  for (const el of jdQueryAll(headingScope, 'h2, h3, p')) {
+    const t = pnNormalizeText(el.textContent || '');
+    if (!t || t.length > 80 || !JD_HIRING_HEADING_RE.test(t)) continue;
+    let root = el.parentElement;
+    for (let i = 0; i < 8 && root; i++) {
+      if (jdQueryAll(root, 'a[href*="/in/"]').length) {
+        push(root);
+        break;
+      }
+      root = root.parentElement;
+    }
+  }
+  return roots;
+}
+
+/** Encart « Rencontrez l’équipe de recrutement » : URL profil (+ nom si visible). */
+function extractJobDetailsHiringContact(panel) {
+  const contacts = [];
+  const seenUrls = new Set();
+  for (const root of jdFindHiringContactRoots(panel)) {
+    for (const a of jdQueryAll(root, 'a[href*="/in/"]')) {
+      const contact = jdHiringContactFromAnchor(a);
+      if (!contact || seenUrls.has(contact.profileUrl)) continue;
+      seenUrls.add(contact.profileUrl);
+      contacts.push(contact);
+    }
+  }
+  if (!contacts.length) return null;
+  const preferred =
+    contacts.find((c) => /auteur de l[’']offre|job poster/i.test(c.roleLabel || '')) || contacts[0];
+  if (contacts.length === 1) return preferred;
+  return { ...preferred, contacts };
+}
+
+/**
+ * Bouclier LinkedIn « Offre d’emploi vérifiée » / Verified job.
+ * Liste : svg#verified-small ; détail : verified-small|medium + aria-label.
+ * @returns {{ verified: boolean, label: string|null, source: string }|null}
+ */
+function extractLinkedinJobVerified(root) {
+  if (!root) return null;
+  const queryAll =
+    typeof querySelectorAllDeep === 'function'
+      ? (sel) => querySelectorAllDeep(root, sel)
+      : (sel) => Array.from(root.querySelectorAll?.(sel) || []);
+
+  const ariaSpan = queryAll('span[role="img"][aria-label]').find((el) => {
+    const a = String(el.getAttribute('aria-label') || '');
+    return /offre d[’']emploi v[eé]rifi[eé]e|verified job/i.test(a);
+  });
+  if (ariaSpan) {
+    return {
+      verified: true,
+      label: String(ariaSpan.getAttribute('aria-label') || '').trim() || null,
+      source: 'aria'
+    };
+  }
+
+  const svg = queryAll('svg#verified-small, svg#verified-medium, svg[id*="verified"]').find((el) => {
+    const id = String(el.id || '');
+    return /^verified-(small|medium)$/i.test(id) || /verified/i.test(id);
+  });
+  if (svg) {
+    const near = svg.closest?.('span[aria-label], [aria-label]');
+    const label = near ? String(near.getAttribute('aria-label') || '').trim() : '';
+    return {
+      verified: true,
+      label: label || 'Offre d’emploi vérifiée',
+      source: 'svg'
+    };
+  }
+
+  // Texte collé au titre (souvent dans le <p> du titre liste).
+  try {
+    const blob = String(root.textContent || '');
+    if (/\(offre d[’']emploi v[eé]rifi[eé]e\)|\(verified job(?: posting)?\)/i.test(blob)) {
+      return { verified: true, label: 'Offre d’emploi vérifiée', source: 'text' };
+    }
+  } catch (_) {}
+
+  return { verified: false, label: null, source: 'none' };
+}
+
+function jdFindSduiRoot(panel, needle) {
+  const scopes = [panel, document].filter(Boolean);
+  for (const scope of scopes) {
+    for (const el of jdQueryAll(scope, `[data-sdui-component*="${needle}"]`)) {
+      if (el) return el;
+    }
+  }
+  return null;
+}
+
+function jdExpandPremiumSeeMore(root) {
+  if (!root?.querySelectorAll) return;
+  try {
+    for (const el of root.querySelectorAll('button, [role="button"], span, a')) {
+      const t = pnNormalizeText(el.innerText || el.textContent || '');
+      if (!t || t.length > 40) continue;
+      if (!/^\.{0,3}\s*plus$|^see more$|^show more$|…\s*plus|\.\.\.\s*plus/i.test(t)) continue;
+      if (el.closest?.('a[href*="/company/"], a[href*="/jobs/"]')) continue;
+      if (typeof el.click === 'function') el.click();
+    }
+  } catch (_) {}
+}
+
+function jdParseIntLoose(raw) {
+  const s = String(raw || '')
+    .replace(/[\u00a0\s]/g, '')
+    .replace(/,/g, '');
+  if (!/^\d+$/.test(s)) return null;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function jdParsePctLoose(raw) {
+  const m = String(raw || '').replace(/\s+/g, '').match(/(-?\d+(?:[.,]\d+)?)\s*%/);
+  if (!m) return null;
+  const n = parseFloat(m[1].replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+function jdParseFloatLoose(raw) {
+  const m = String(raw || '').replace(/\s+/g, ' ').match(/(-?\d+(?:[.,]\d+)?)/);
+  if (!m) return null;
+  const n = parseFloat(m[1].replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+}
+
+function jdNormalizeCompanyHrefLocal(raw) {
+  if (typeof pnNormalizeCompanyHref === 'function') {
+    const u = pnNormalizeCompanyHref(raw);
+    if (u) return u;
+  }
+  if (typeof swNormalizeLinkedinCompanyUrl === 'function') {
+    const u = swNormalizeLinkedinCompanyUrl(raw);
+    if (u) return u;
+  }
+  let s = String(raw || '').trim();
+  if (!s) return null;
+  if (!s.startsWith('http')) {
+    s = s.startsWith('/') ? `https://www.linkedin.com${s}` : `https://www.linkedin.com/${s}`;
+  }
+  try {
+    const u = new URL(s);
+    if (!u.hostname.toLowerCase().endsWith('linkedin.com')) return null;
+    const m = u.pathname.match(/^(\/company\/[^/?#]+)/i);
+    if (!m) return null;
+    return `https://www.linkedin.com${m[1].replace(/\/$/, '')}/`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function jdSliceSection(text, startRe, endRes) {
+  const s = String(text || '');
+  const start = s.search(startRe);
+  if (start < 0) return '';
+  let end = s.length;
+  for (const re of endRes || []) {
+    const rest = s.slice(start + 1);
+    const m = rest.search(re);
+    if (m >= 0) end = Math.min(end, start + 1 + m);
+  }
+  return s.slice(start, end).trim().slice(0, 4000);
+}
+
+/** Stats Premium agrégées (pas de profils individuels). */
+function extractPremiumApplicantInsights(panel) {
+  const root = jdFindSduiRoot(panel, 'premiumApplicantInsightsForJobDetails');
+  if (!root) return null;
+  jdExpandPremiumSeeMore(root);
+  const rawMultiline = String(root.innerText || root.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const rawText = pnNormalizeText(rawMultiline).slice(0, 4000);
+  if (!rawText || rawText.length < 40) return null;
+
+  let applicantsTotal = null;
+  let applicantsLastDay = null;
+  const totalMatch = rawMultiline.match(/(\d[\d\s,]*)\s*\n?\s*(?:total|au total)\b/i);
+  if (totalMatch) applicantsTotal = jdParseIntLoose(totalMatch[1]);
+  const dayMatch = rawMultiline.match(
+    /(\d[\d\s,]*)\s*\n?\s*(?:sur la journée écoulée|in the past day|past 24 hours|last day)/i
+  );
+  if (dayMatch) applicantsLastDay = jdParseIntLoose(dayMatch[1]);
+
+  const experienceLevels = [];
+  const expRe =
+    /(\d+)\s*%\s*(?:de candidats potentiels de niveau|of potential applicants (?:are|at level))\s+([^\n]+)/gi;
+  let m;
+  while ((m = expRe.exec(rawMultiline))) {
+    const label = pnNormalizeText(m[2]).slice(0, 80);
+    if (!label) continue;
+    experienceLevels.push({ pct: parseInt(m[1], 10), label });
+  }
+
+  const educationLevels = [];
+  const eduRe =
+    /(\d+)\s*%\s*(?:détiennent(?: un diplôme de niveau)?|hold(?: a)?|have(?: a)?)\s+([^\n]+)/gi;
+  while ((m = eduRe.exec(rawMultiline))) {
+    const label = pnNormalizeText(m[2])
+      .replace(/\s*\(comme vous\)\s*/gi, '')
+      .slice(0, 120);
+    if (!label) continue;
+    educationLevels.push({ pct: parseInt(m[1], 10), label });
+  }
+
+  return {
+    applicantsTotal,
+    applicantsLastDay,
+    experienceLevels,
+    educationLevels,
+    rawText
+  };
+}
+
+/** Insights Premium entreprise : priorités, recrutements, tendance, concurrents. */
+function extractPremiumCompanyInsights(panel) {
+  const root = jdFindSduiRoot(panel, 'premiumCompanyInsightsForJobDetails');
+  if (!root) return null;
+  jdExpandPremiumSeeMore(root);
+  const rawMultiline = String(root.innerText || root.textContent || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const rawText = pnNormalizeText(rawMultiline).slice(0, 8000);
+  if (!rawText || rawText.length < 40) return null;
+
+  const prioritiesText =
+    jdSliceSection(
+      rawMultiline,
+      /Priorités de l[’']entreprise|Company priorities|Company priority/i,
+      [/Recrutements et effectifs/i, /Hiring and headcount/i, /La dernière tendance/i, /Latest hiring/i, /Concurrents/i, /Competitors/i]
+    ) || null;
+
+  const hiringAndHeadcountText =
+    jdSliceSection(
+      rawMultiline,
+      /Recrutements et effectifs|Hiring and headcount/i,
+      [/La dernière tendance/i, /Latest hiring/i, /Concurrents/i, /Competitors/i, /Afficher les Infos Premium/i]
+    ) || null;
+
+  const trendBlock =
+    jdSliceSection(
+      rawMultiline,
+      /La dernière tendance en matière de recrutement|Latest hiring trend/i,
+      [/Concurrents/i, /Competitors/i, /Afficher les Infos Premium/i, /Show Premium/i]
+    ) || '';
+
+  let employeesTotal = null;
+  const empMatch =
+    rawMultiline.match(/(\d[\d\s,]*)\s*\n?\s*Nombre total d[’']employés/i) ||
+    rawMultiline.match(/Total employees?\s*[^\d\n]*(\d[\d\s,]*)/i);
+  if (empMatch) employeesTotal = jdParseIntLoose(empMatch[1]);
+
+  let companyGrowth2yPct = null;
+  const companyGrowthMatch =
+    rawMultiline.match(/(\d[\d\s.,]*)\s*%\s*\n?\s*(?:Au niveau de l[’']entreprise|Company[- ]wide|Entire company)/i);
+  if (companyGrowthMatch) companyGrowth2yPct = jdParsePctLoose(companyGrowthMatch[1] + '%');
+
+  const segmentGrowth = [];
+  const segRe =
+    /(\d[\d\s.,]*)\s*%\s*\n\s*([^\n%]{2,60}?)\s*\n\s*Croissance sur 2/gi;
+  let sm;
+  const trendSrc = trendBlock || rawMultiline;
+  while ((sm = segRe.exec(trendSrc))) {
+    const label = pnNormalizeText(sm[2]);
+    if (!label || /au niveau de l[’']entreprise|company[- ]wide|entire company/i.test(label)) continue;
+    const pct = jdParsePctLoose(sm[1] + '%');
+    if (pct == null) continue;
+    segmentGrowth.push({ label: label.slice(0, 80), growth2yPct: pct });
+  }
+
+  let medianTenureYears = null;
+  const tenureMatch =
+    rawMultiline.match(/Durée médiane d[’']ancienneté\s*:\s*([\d.,]+)\s*ans/i) ||
+    rawMultiline.match(/Median tenure\s*:\s*([\d.,]+)\s*years?/i);
+  if (tenureMatch) medianTenureYears = jdParseFloatLoose(tenureMatch[1]);
+
+  const competitors = [];
+  const seenComp = new Set();
+  for (const a of jdQueryAll(root, 'a[href*="/company/"]')) {
+    const href = a.getAttribute('href') || a.href || '';
+    if (/\/insights\/?/i.test(href)) continue;
+    const companyLinkedinUrl = jdNormalizeCompanyHrefLocal(href);
+    if (!companyLinkedinUrl || seenComp.has(companyLinkedinUrl)) continue;
+    const imgAlt = pnNormalizeText(a.querySelector?.('img')?.alt || '');
+    const linkText = pnNormalizeText(a.innerText || a.textContent || '');
+    const name = (imgAlt || linkText).slice(0, 120);
+    if (!name || /afficher|show premium|infos premium/i.test(name)) continue;
+    seenComp.add(companyLinkedinUrl);
+    competitors.push({ name, companyLinkedinUrl });
+  }
+
+  const competitorsText =
+    jdSliceSection(
+      rawMultiline,
+      /Concurrents|Competitors/i,
+      [/Afficher les Infos Premium/i, /Show Premium insights/i, /Sources\s*:/i]
+    ) || null;
+
+  const hiringTrend = {
+    employeesTotal,
+    companyGrowth2yPct,
+    segmentGrowth,
+    medianTenureYears
+  };
+
+  const hasSignal =
+    !!prioritiesText ||
+    !!hiringAndHeadcountText ||
+    employeesTotal != null ||
+    companyGrowth2yPct != null ||
+    segmentGrowth.length > 0 ||
+    medianTenureYears != null ||
+    competitors.length > 0 ||
+    !!competitorsText;
+
+  if (!hasSignal) return null;
+
+  return {
+    prioritiesText: prioritiesText ? pnNormalizeText(prioritiesText) : null,
+    hiringAndHeadcountText: hiringAndHeadcountText
+      ? pnNormalizeText(hiringAndHeadcountText)
+      : null,
+    hiringTrend,
+    competitors,
+    competitorsText: competitorsText ? pnNormalizeText(competitorsText) : null,
+    rawText
+  };
+}
+
 function buildJobCardPayload(wrapper) {
   const { jobTitle, jobUrl } = getJobInfoFromWrapper(wrapper || document.body);
   const companyName = getCompanyNameFromJobWrapper(wrapper);
@@ -806,6 +1247,7 @@ function buildJobCardPayload(wrapper) {
   const preferredCard = hint && jdLooksLikeGeographicLocation(hint) && !jdIsJobMetadataNoise(hint) ? hint : '';
   const { location, details } = splitJobMetadata(metadataItems, preferredCard);
   if (!companyName && !jobTitle && !linkedinJobId && !jobUrl) return null;
+  const verifiedInfo = extractLinkedinJobVerified(wrapper);
 
   return {
     stage: 'card',
@@ -815,11 +1257,14 @@ function buildJobCardPayload(wrapper) {
     jobTitle: jobTitle || null,
     jobUrl: pnNormalizeText(jobUrl) || null,
     location: location || null,
+    linkedinVerified: verifiedInfo?.verified === true,
     source: 'linkedin_jobs',
     seenAt: new Date().toISOString(),
     cardData: {
       metadataItems,
       detailsText: details || null,
+      linkedinVerified: verifiedInfo?.verified === true,
+      verifiedJob: verifiedInfo || null,
       attributes: {
         dataJobId: wrapper?.getAttribute?.('data-job-id') || null,
         dataOccludableJobId: wrapper?.getAttribute?.('data-occludable-job-id') || null
@@ -948,6 +1393,18 @@ function buildJobDetailsPayload(wrapper) {
       ? findCompanyUrlFromOpenJobDetailsPanel(resolvedJobUrl)
       : null;
   const companyLinkedinUrl = insightUrl || headerUrl || null;
+  const hiringContact = extractJobDetailsHiringContact(detailsPanel);
+  const premiumApplicantInsights = extractPremiumApplicantInsights(detailsPanel);
+  const premiumCompanyInsights = extractPremiumCompanyInsights(detailsPanel);
+  const verifiedFromDetail = extractLinkedinJobVerified(detailsPanel);
+  const verifiedFromCard = cardPayload.cardData?.verifiedJob || null;
+  const verifiedInfo =
+    verifiedFromDetail?.verified === true
+      ? verifiedFromDetail
+      : verifiedFromCard?.verified === true
+        ? verifiedFromCard
+        : verifiedFromDetail || verifiedFromCard || { verified: false, label: null, source: 'none' };
+  const linkedinVerified = verifiedInfo?.verified === true;
 
   if (!jobTitle && !linkedinJobId && !jobUrl && !descriptionText) return null;
   // Description encore absente : payload « loading » (ne pas sauver comme complete).
@@ -966,10 +1423,11 @@ function buildJobDetailsPayload(wrapper) {
       postedText: filters.postedText,
       postedAt: filters.postedAt,
       applicantsCount: filters.applicantsCount,
+      linkedinVerified,
       descriptionText: '',
       detailsScrapedAt: null,
       source: 'linkedin_jobs',
-      linkedinData: { card: cardPayload.cardData || null, details: { companyInsight: null } }
+      linkedinData: { card: cardPayload.cardData || null, details: { companyInsight: null, verifiedJob: verifiedInfo } }
     };
   }
 
@@ -988,6 +1446,7 @@ function buildJobDetailsPayload(wrapper) {
     postedAt: filters.postedAt || null,
     applicantsCount:
       typeof filters.applicantsCount === 'number' ? filters.applicantsCount : null,
+    linkedinVerified,
     descriptionText,
     detailsScrapedAt: new Date().toISOString(),
     source: 'linkedin_jobs',
@@ -1005,6 +1464,7 @@ function buildJobDetailsPayload(wrapper) {
         postedAt: filters.postedAt || null,
         applicantsCount:
           typeof filters.applicantsCount === 'number' ? filters.applicantsCount : null,
+        verifiedJob: verifiedInfo,
         companyInsight: companyInsight
           ? {
               companyName: companyInsight.companyName || null,
@@ -1013,7 +1473,10 @@ function buildJobDetailsPayload(wrapper) {
               companyLinkedinUrl: companyInsight.companyLinkedinUrl || null,
               insightSource: companyInsight.insightSource || null
             }
-          : null
+          : null,
+        ...(hiringContact ? { hiringContact } : {}),
+        ...(premiumApplicantInsights ? { premiumApplicantInsights } : {}),
+        ...(premiumCompanyInsights ? { premiumCompanyInsights } : {})
       }
     }
   };
@@ -1082,7 +1545,11 @@ function getJobDeskReadyState(payload, expectedJid, opts) {
       descriptionLength,
       String(payload?.linkedinData?.details?.companyInsight?.companyLinkedinUrl || ''),
       String(payload?.linkedinData?.details?.companyInsight?.aboutSnippet || '').length,
-      String(payload?.linkedinData?.details?.companyInsight?.employeesHint || '')
+      String(payload?.linkedinData?.details?.companyInsight?.employeesHint || ''),
+      String(payload?.linkedinData?.details?.hiringContact?.profileUrl || ''),
+      String(payload?.linkedinData?.details?.premiumApplicantInsights?.applicantsTotal ?? ''),
+      String(payload?.linkedinData?.details?.premiumCompanyInsights?.hiringTrend?.employeesTotal ?? ''),
+      payload?.linkedinVerified === true ? '1' : '0'
     ])
   };
 }
@@ -1097,6 +1564,129 @@ function jdScrapeHasCompleteCompanyInsight(payload) {
   if (aboutLen < JOB_SCRAPE_INSIGHT_MIN_ABOUT_LEN) return false;
   if (!url && !emp) return false;
   return true;
+}
+
+function jdScrapeHasHiringContact(payload) {
+  return !!String(payload?.linkedinData?.details?.hiringContact?.profileUrl || '').trim();
+}
+
+function jdScrapeHasMeaningfulPremium(payload) {
+  const app = payload?.linkedinData?.details?.premiumApplicantInsights;
+  const co = payload?.linkedinData?.details?.premiumCompanyInsights;
+  if (app && (typeof app.applicantsTotal === 'number' || (app.experienceLevels || []).length)) {
+    return true;
+  }
+  if (
+    co &&
+    (typeof co.hiringTrend?.employeesTotal === 'number' ||
+      typeof co.hiringTrend?.companyGrowth2yPct === 'number' ||
+      (co.competitors || []).length > 0 ||
+      String(co.prioritiesText || '').trim().length > 40 ||
+      String(co.hiringAndHeadcountText || '').trim().length > 40)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Contact ou insights Premium exploitables présents dans le payload. */
+function jdScrapeHasEnrichment(payload) {
+  return jdScrapeHasHiringContact(payload) || jdScrapeHasMeaningfulPremium(payload);
+}
+
+/** Conserve le cœur le plus récent tout en préservant contact / Premium déjà capturés. */
+function jdPreferRicherJobPayload(prev, next) {
+  if (!next) return prev || null;
+  if (!prev || prev.stage === 'details_loading') return next;
+  const out = next;
+  const prevD = prev.linkedinData?.details || {};
+  const nextD = out.linkedinData?.details || {};
+  if (!out.linkedinData) out.linkedinData = { details: {} };
+  if (!out.linkedinData.details) out.linkedinData.details = {};
+  if (!nextD.hiringContact && prevD.hiringContact) {
+    out.linkedinData.details.hiringContact = prevD.hiringContact;
+  }
+  if (!nextD.premiumApplicantInsights && prevD.premiumApplicantInsights) {
+    out.linkedinData.details.premiumApplicantInsights = prevD.premiumApplicantInsights;
+  }
+  if (!nextD.premiumCompanyInsights && prevD.premiumCompanyInsights) {
+    out.linkedinData.details.premiumCompanyInsights = prevD.premiumCompanyInsights;
+  }
+  if (prevD.verifiedJob?.verified === true && nextD.verifiedJob?.verified !== true) {
+    out.linkedinData.details.verifiedJob = prevD.verifiedJob;
+    out.linkedinVerified = true;
+  } else if (out.linkedinVerified !== true && prev.linkedinVerified === true) {
+    out.linkedinVerified = true;
+  }
+  // Prefer richer premium / hiring if both present but next is thinner.
+  if (
+    prevD.hiringContact?.profileUrl &&
+    nextD.hiringContact?.profileUrl &&
+    !nextD.hiringContact.fullName &&
+    prevD.hiringContact.fullName
+  ) {
+    out.linkedinData.details.hiringContact = prevD.hiringContact;
+  }
+  return out;
+}
+
+/** DOM : encarts contact / Premium déjà injectés (même partiels). */
+function jdDomHasEnrichmentRoots(panel) {
+  const root = panel || getJobDetailsPanel() || document;
+  try {
+    if (root.querySelector?.('[data-sdui-component*="peopleWhoCanHelp"]')) return true;
+    if (root.querySelector?.('[data-sdui-component*="premiumApplicantInsightsForJobDetails"]')) {
+      return true;
+    }
+    if (root.querySelector?.('[data-sdui-component*="premiumCompanyInsightsForJobDetails"]')) {
+      return true;
+    }
+    if (root.querySelector?.('[class*="jobs-poster"], [class*="hirer-card"]')) return true;
+  } catch (_) {}
+  return false;
+}
+
+/**
+ * Force le lazy-load des blocs bas de Jobdesk (équipe recrutement + Premium)
+ * en scrollant progressivement le panneau détail.
+ */
+function jdRevealHiringAndPremiumSections() {
+  const panel = getJobDetailsPanel();
+  if (!panel) return;
+  try {
+    const maxScroll = Math.max(0, (panel.scrollHeight || 0) - (panel.clientHeight || 0));
+    if (maxScroll > 48) {
+      const step = Math.max(280, Math.floor((panel.clientHeight || 400) * 0.7));
+      const next = Math.min((panel.scrollTop || 0) + step, maxScroll);
+      panel.scrollTop = next;
+      // Si déjà en bas, remonter un peu puis redescendre pour re-trigger lazy.
+      if (next >= maxScroll - 8 && (panel.scrollTop || 0) > step) {
+        panel.scrollTop = Math.max(0, maxScroll - step * 2);
+      }
+    }
+  } catch (_) {}
+
+  try {
+    const hiringRoot =
+      jdFindSduiRoot(panel, 'peopleWhoCanHelp') ||
+      panel.querySelector?.('[class*="jobs-poster"]') ||
+      null;
+    if (hiringRoot && typeof hiringRoot.scrollIntoView === 'function') {
+      hiringRoot.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  } catch (_) {}
+
+  try {
+    const premiumRoot =
+      jdFindSduiRoot(panel, 'premiumCompanyInsightsForJobDetails') ||
+      jdFindSduiRoot(panel, 'premiumApplicantInsightsForJobDetails');
+    if (premiumRoot) {
+      if (typeof premiumRoot.scrollIntoView === 'function') {
+        premiumRoot.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+      jdExpandPremiumSeeMore(premiumRoot);
+    }
+  } catch (_) {}
 }
 
 /** Encart entreprise : un léger scroll bas + max 1 « Voir plus » (évite de lutter avec LinkedIn). */
@@ -1130,6 +1720,7 @@ function jdRevealCompanyInsightCard() {
       break;
     }
   } catch (_) {}
+  jdRevealHiringAndPremiumSections();
 }
 
 function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
@@ -1149,7 +1740,11 @@ function pnSaveJobOfferToBackground(jobOffer, wrapper, opts) {
     jobOffer.descriptionText || '',
     jobOffer.linkedinData?.details?.companyInsight?.aboutSnippet || '',
     jobOffer.linkedinData?.details?.companyInsight?.employeesHint || '',
-    jobOffer.linkedinData?.details?.companyInsight?.companyLinkedinUrl || ''
+    jobOffer.linkedinData?.details?.companyInsight?.companyLinkedinUrl || '',
+    jobOffer.linkedinData?.details?.hiringContact?.profileUrl || '',
+    jobOffer.linkedinData?.details?.premiumApplicantInsights?.applicantsTotal ?? '',
+    jobOffer.linkedinData?.details?.premiumCompanyInsights?.hiringTrend?.employeesTotal ?? '',
+    (jobOffer.linkedinData?.details?.premiumCompanyInsights?.competitors || []).length
   ]);
   if (!confirmComplete && fingerprint === lastSavedJobFingerprint) {
     return Promise.resolve({ ok: true, persistedComplete: false, skippedDuplicateFingerprint: true });
@@ -1215,7 +1810,10 @@ function scheduleJobOfferScrape(wrapper, opts) {
     let warnedJidMismatch = false;
     let warnedShortDesc = false;
     let warnedMissingInsight = false;
+    let warnedWaitingEnrich = false;
     let revealInsightEvery = 0;
+    /** Timestamp où le cœur (desc + meta) est devenu prêt — pour grace enrich. */
+    let coreReadySince = 0;
 
     const done = (result) => {
       if (finished) return;
@@ -1254,6 +1852,7 @@ function scheduleJobOfferScrape(wrapper, opts) {
         revealInsightEvery = 2;
         try {
           if (jdPanelHasDescriptionExpandControl(getJobDetailsPanel())) jdRevealJobDescription();
+          jdRevealHiringAndPremiumSections();
         } catch (_) {}
       } else if (revealInsightEvery === 2 && elapsed >= 4500) {
         revealInsightEvery = 3;
@@ -1261,11 +1860,21 @@ function scheduleJobOfferScrape(wrapper, opts) {
           if (jdPanelHasDescriptionExpandControl(getJobDetailsPanel())) jdRevealJobDescription();
           jdRevealCompanyInsightCard();
         } catch (_) {}
+      } else if (elapsed >= 4500) {
+        // Continue à scroller tant que contact / Premium manquent (lazy LinkedIn).
+        try {
+          if (!jdScrapeHasEnrichment(bestPayload) || !jdDomHasEnrichmentRoots()) {
+            jdRevealHiringAndPremiumSections();
+          }
+        } catch (_) {}
       }
 
       const payload = buildJobDetailsPayload(wrapper);
-      if (payload && payload.stage !== 'details_loading') bestPayload = payload;
-      else if (payload && !bestPayload) bestPayload = payload;
+      if (payload && payload.stage !== 'details_loading') {
+        bestPayload = jdPreferRicherJobPayload(bestPayload, payload);
+      } else if (payload && !bestPayload) {
+        bestPayload = payload;
+      }
 
       const descLenNow = String(payload?.descriptionText || bestPayload?.descriptionText || '').trim()
         .length;
@@ -1326,54 +1935,80 @@ function scheduleJobOfferScrape(wrapper, opts) {
       if (isReady) {
         stableReadyCount = signature === lastReadySignature ? stableReadyCount + 1 : 1;
         lastReadySignature = signature;
+        if (!coreReadySince) coreReadySince = Date.now();
       } else {
         stableReadyCount = 0;
         lastReadySignature = '';
+        coreReadySince = 0;
+      }
+
+      const enrichReady = jdScrapeHasEnrichment(payload);
+      const enrichGraceElapsed = coreReadySince ? Date.now() - coreReadySince : 0;
+      const enrichWaitDone =
+        enrichReady ||
+        (coreReadySince && enrichGraceElapsed >= JOB_SCRAPE_ENRICH_GRACE_MS) ||
+        Date.now() - started >= JOB_SCRAPE_ENRICH_ABS_SOFT_MS;
+
+      if (isReady && !enrichWaitDone && !warnedWaitingEnrich) {
+        warnedWaitingEnrich = true;
+        jdScLog({
+          jid: jid0,
+          st: 'w_enrich',
+          o: origin,
+          ms: Date.now() - started,
+          dom: jdDomHasEnrichmentRoots() ? 1 : 0
+        });
       }
 
       const requiredStablePolls = requireCompanyInsight ? JOB_SCRAPE_INSIGHT_STABLE_POLLS : 1;
       if (
         stableReadyCount >= requiredStablePolls &&
+        enrichWaitDone &&
         payload &&
         payload.stage !== 'details_loading' &&
         String(payload.descriptionText || '').trim().length >= JOB_SCRAPE_MIN_DESCRIPTION_LEN
       ) {
-        const saveRes = await pnSaveJobOfferToBackground(payload, wrapper, {
+        const toSave = jdPreferRicherJobPayload(bestPayload, payload) || payload;
+        const saveRes = await pnSaveJobOfferToBackground(toSave, wrapper, {
           confirmComplete: waitForSupabaseComplete
         });
         const persistedComplete = !!saveRes?.persistedComplete;
-        const ci = payload.linkedinData?.details?.companyInsight;
+        const ci = toSave.linkedinData?.details?.companyInsight;
         jdScLog({
-          jid: String(payload.linkedinJobId || jid0),
+          jid: String(toSave.linkedinJobId || jid0),
           st: 'ok',
           o: origin,
           ms: Date.now() - started,
-          dl: String(payload.descriptionText || '').length,
+          dl: String(toSave.descriptionText || '').length,
           pc: persistedComplete ? 1 : 0,
-          co_url: payload.companyLinkedinUrl ? 1 : 0,
+          co_url: toSave.companyLinkedinUrl ? 1 : 0,
           ci_src: ci?.insightSource || '',
           ci_about: ci?.aboutSnippet ? String(ci.aboutSnippet).length : 0,
-          ci_emp: ci?.employeesHint ? 1 : 0
+          ci_emp: ci?.employeesHint ? 1 : 0,
+          hc_url: toSave.linkedinData?.details?.hiringContact?.profileUrl ? 1 : 0,
+          verified: toSave.linkedinVerified === true ? 1 : 0,
+          prem: jdScrapeHasMeaningfulPremium(toSave) ? 1 : 0
         });
         if (
-          payload.companyType === 'Client' &&
-          payload.companyName &&
+          toSave.companyType === 'Client' &&
+          toSave.companyName &&
           typeof prefetchFinancialDataForClient === 'function'
         ) {
           let card = wrapper;
-          if (!card?.isConnected && payload.linkedinJobId) {
-            const id = String(payload.linkedinJobId);
+          if (!card?.isConnected && toSave.linkedinJobId) {
+            const id = String(toSave.linkedinJobId);
             card =
               document.querySelector(`[data-job-id="${id}"]`) ||
               document.querySelector(`[data-occludable-job-id="${id}"]`);
           }
-          prefetchFinancialDataForClient(card || document.body, payload.companyName);
+          prefetchFinancialDataForClient(card || document.body, toSave.companyName);
         }
         done({ state: 'ok', persistedComplete, saveOk: !!saveRes?.ok });
         return;
       }
 
       // Description OK mais encart entreprise absent : ne pas attendre le max (blocage auto-open).
+      // Toujours respecter la grace enrich (contact / Premium) avant soft-save.
       const softPanelJid = String(bestPayload?.linkedinJobId || '').trim();
       const softJidOk =
         !expectedJid || !softPanelJid || softPanelJid === String(expectedJid).trim();
@@ -1385,8 +2020,12 @@ function scheduleJobOfferScrape(wrapper, opts) {
         bestPayload.stage !== 'details_loading' &&
         softDescLen >= JOB_SCRAPE_MIN_DESCRIPTION_LEN &&
         (!softStillCollapsed || softDescLen >= JOB_SCRAPE_FULL_DESCRIPTION_TARGET);
+      const softEnrichOk =
+        jdScrapeHasEnrichment(bestPayload) ||
+        Date.now() - started >= JOB_SCRAPE_ENRICH_ABS_SOFT_MS;
       if (
         softDescOk &&
+        softEnrichOk &&
         (!requireCompanyInsight || !jdScrapeHasCompleteCompanyInsight(bestPayload)) &&
         Date.now() - started >= (requireCompanyInsight ? JOB_SCRAPE_SOFT_NO_INSIGHT_MS : 4500)
       ) {
@@ -1401,7 +2040,10 @@ function scheduleJobOfferScrape(wrapper, opts) {
           ms: Date.now() - started,
           dl: String(bestPayload.descriptionText || '').length,
           pc: persistedComplete ? 1 : 0,
-          soft: 1
+          soft: 1,
+          hc_url: bestPayload.linkedinData?.details?.hiringContact?.profileUrl ? 1 : 0,
+          verified: bestPayload.linkedinVerified === true ? 1 : 0,
+          prem: jdScrapeHasMeaningfulPremium(bestPayload) ? 1 : 0
         });
         if (
           bestPayload.companyType === 'Client' &&

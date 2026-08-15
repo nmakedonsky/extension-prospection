@@ -6,6 +6,9 @@ const PN_LOADING_STUCK_MS = 45000;
 
 /** Cache mémoire nom → type : re-peint les badges quand LinkedIn virtualise / recycle les cartes. */
 const PN_COMPANY_TYPE_CACHE = new Map();
+/** Cache mémoire nom → légitimité (lecture Supabase). */
+const PN_COMPANY_LEGIT_CACHE = new Map();
+const PN_LEGIT_VERDICTS = new Set(['real', 'recruiter', 'shell', 'uncertain']);
 
 function createBadge(kind) {
   const span = document.createElement('span');
@@ -19,6 +22,90 @@ function createBadge(kind) {
   span.textContent = kind === 'loading' ? '…' : kind === 'Client' ? 'Client' : 'SS2I';
   span.setAttribute('data-prospection-badge', '1');
   return span;
+}
+
+/** Vert = real ; orange = recruiter|uncertain ; rouge = shell. */
+function pnLegitTone(verdict) {
+  const v = String(verdict || '').toLowerCase();
+  if (v === 'real') return 'real';
+  if (v === 'shell') return 'shell';
+  if (v === 'recruiter' || v === 'uncertain') return 'warn';
+  return null;
+}
+
+function pnLegitTooltip(info) {
+  if (!info || !info.verdict) return '';
+  const p = info.payload && typeof info.payload === 'object' ? info.payload : {};
+  const lines = [];
+  const label =
+    info.verdict === 'real'
+      ? 'Employeur réel'
+      : info.verdict === 'recruiter'
+        ? 'Recruteur / staffing'
+        : info.verdict === 'shell'
+          ? 'Coquille / footprint faible'
+          : 'Incertain';
+  lines.push(label);
+  if (info.confidence != null && info.confidence !== '') lines.push(`Confiance: ${info.confidence}%`);
+  if (p.hq_country) lines.push(`HQ: ${p.hq_country}`);
+  if (p.has_eu_legal_entity === true) lines.push('Entité légale EU/UK: oui');
+  if (p.has_eu_legal_entity === false) lines.push('Entité légale EU/UK: non');
+  if (p.official_website) lines.push(`Site: ${String(p.official_website).slice(0, 80)}`);
+  if (info.india_bodyshop) lines.push('Pattern India bodyshop: oui');
+  const reasons = Array.isArray(p.reasons) ? p.reasons : [];
+  for (const r of reasons.slice(0, 3)) {
+    const t = String(r || '').trim();
+    if (t) lines.push(`• ${t.slice(0, 160)}`);
+  }
+  return lines.join('\n');
+}
+
+function createLegitimacyPastille(info) {
+  const tone = pnLegitTone(info?.verdict);
+  if (!tone) return null;
+  const span = document.createElement('span');
+  span.className = `pn-legit pn-legit--${tone}`;
+  span.setAttribute('data-prospection-legit', '1');
+  span.setAttribute('data-verdict', String(info.verdict));
+  span.setAttribute('aria-label', `Légitimité: ${info.verdict}`);
+  const tip = pnLegitTooltip(info);
+  if (tip) span.setAttribute('title', tip);
+  return span;
+}
+
+function pnRememberCompanyLegitimacy(name, info) {
+  const n = String(name || '').trim();
+  if (!n || !info || !PN_LEGIT_VERDICTS.has(String(info.verdict || '').toLowerCase())) return;
+  const normalized = {
+    verdict: String(info.verdict).toLowerCase(),
+    india_bodyshop: !!info.india_bodyshop,
+    confidence: info.confidence ?? null,
+    payload: info.payload && typeof info.payload === 'object' ? info.payload : null,
+    at: info.at || null
+  };
+  PN_COMPANY_LEGIT_CACHE.set(n, normalized);
+  const k = typeof pnNormalizeCompanyKey === 'function' ? pnNormalizeCompanyKey(n) : '';
+  if (k) PN_COMPANY_LEGIT_CACHE.set(k, normalized);
+}
+
+function pnLookupCompanyLegitimacy(name) {
+  const n = String(name || '').trim();
+  if (!n) return null;
+  const direct = PN_COMPANY_LEGIT_CACHE.get(n);
+  if (direct && PN_LEGIT_VERDICTS.has(direct.verdict)) return direct;
+  const k = typeof pnNormalizeCompanyKey === 'function' ? pnNormalizeCompanyKey(n) : '';
+  if (!k) return null;
+  const folded = PN_COMPANY_LEGIT_CACHE.get(k);
+  return folded && PN_LEGIT_VERDICTS.has(folded.verdict) ? folded : null;
+}
+
+function ensureLegitimacyPastilleOnHost(host, companyName) {
+  if (!host) return;
+  host.querySelectorAll('.pn-legit').forEach((b) => b.remove());
+  const info = companyName ? pnLookupCompanyLegitimacy(companyName) : null;
+  if (!info) return;
+  const el = createLegitimacyPastille(info);
+  if (el) host.appendChild(el);
 }
 
 /** Hôte du badge : nom société, sinon ligne titre, sinon la carte. */
@@ -135,6 +222,32 @@ async function sendClassifyBatchChunk(companyNames) {
   return {};
 }
 
+/** Ingère types + légitimité du SW (un seul round-trip). Retourne la map types. */
+function pnIngestClassifyPayload(part) {
+  if (!part || typeof part !== 'object') return {};
+  const hasEnvelope = part.types != null || part.legitimacy != null;
+  const types = hasEnvelope
+    ? part.types && typeof part.types === 'object'
+      ? part.types
+      : {}
+    : part;
+  const legitimacy =
+    hasEnvelope && part.legitimacy && typeof part.legitimacy === 'object' ? part.legitimacy : {};
+  for (const [name, info] of Object.entries(legitimacy)) {
+    if (info && info.verdict) pnRememberCompanyLegitimacy(name, info);
+  }
+  for (const [name, type] of Object.entries(types)) {
+    if (name === '__pnTimeout') continue;
+    if (type === 'Client' || type === 'SS2I') pnRememberCompanyType(name, type);
+  }
+  const out = {};
+  for (const [name, type] of Object.entries(types)) {
+    if (name === '__pnTimeout') continue;
+    out[name] = type;
+  }
+  return out;
+}
+
 async function sendClassifyBatch(companyNames, opts) {
   const list = [
     ...new Set(
@@ -156,10 +269,11 @@ async function sendClassifyBatch(companyNames, opts) {
     const part = await sendClassifyBatchChunk(chunk);
     if (part && typeof part === 'object') {
       const { __pnTimeout, ...rest } = part;
-      Object.assign(out, rest);
+      const types = pnIngestClassifyPayload(rest);
+      Object.assign(out, types);
       if (onChunk) {
         try {
-          onChunk(rest, { chunkIdx, totalChunks });
+          onChunk(types, { chunkIdx, totalChunks });
         } catch (_) {}
       }
     }
@@ -175,9 +289,9 @@ function ensureBadgeOnProcessedCard(card) {
   if (isNodeInJobDetailsComposed(card)) return;
   const host = getBadgeHostElement(card);
   if (!host) return;
-  const hasBadge = !!host.querySelector('.pn-badge');
-  if (hasBadge) return;
-  host.appendChild(createBadge(type));
+  if (!host.querySelector('.pn-badge')) host.appendChild(createBadge(type));
+  const name = extractCompanyName(findCompanyElementInCard(card));
+  ensureLegitimacyPastilleOnHost(host, name);
 }
 
 /**
@@ -216,7 +330,7 @@ function pnStripVisibleListBadges() {
     card.removeAttribute(DATA_LOADING);
     card.removeAttribute(DATA_LOADING_AT);
     try {
-      getBadgeHostElement(card)?.querySelectorAll('.pn-badge').forEach((b) => b.remove());
+      getBadgeHostElement(card)?.querySelectorAll('.pn-badge, .pn-legit').forEach((b) => b.remove());
     } catch (_) {}
   }
 }
@@ -367,6 +481,7 @@ function applyClassificationToCard(card, type) {
   if (el && !isNodeInJobDetailsComposed(card)) {
     el.querySelectorAll('.pn-badge').forEach((b) => b.remove());
     el.appendChild(createBadge(type));
+    ensureLegitimacyPastilleOnHost(el, companyName);
   }
 }
 
@@ -473,6 +588,24 @@ async function runClassificationPass(opts) {
   const companyNames = [...byCompany.keys()].filter((n) => !pnLookupCompanyType(n));
   const allNamesInPass = [...byCompany.keys()];
 
+  // Batch unique : type manquant OU légitimité manquante (évite 2e round-trip LEGITIMACY_*).
+  const namesForBatch = [
+    ...new Set(
+      [...allNamesInPass].filter((n) => !pnLookupCompanyType(n) || !pnLookupCompanyLegitimacy(n))
+    )
+  ];
+
+  // Noms déjà traités sur la page (pastilles si backfill dispo).
+  const processedNames = [];
+  for (const card of cards) {
+    if (!card.hasAttribute(DATA_PROCESSED)) continue;
+    const n = extractCompanyName(findCompanyElementInCard(card));
+    if (n && n.length >= 2 && !pnLookupCompanyLegitimacy(n)) processedNames.push(n);
+  }
+  for (const n of processedNames) {
+    if (!namesForBatch.includes(n)) namesForBatch.push(n);
+  }
+
   if (!allNamesInPass.length) {
     if (!cards.length) {
       if (typeof jdLog === 'function') {
@@ -490,7 +623,13 @@ async function runClassificationPass(opts) {
       if (!name || name.length < 2) continue;
       namedGaps += 1;
     }
-    if (processedOnPage > 0 && namedGaps === 0) return true;
+    if (processedOnPage > 0 && namedGaps === 0) {
+      if (namesForBatch.length) {
+        await sendClassifyBatch(namesForBatch);
+        pnRepaintVisibleBadgesFromCache();
+      }
+      return true;
+    }
     if (typeof jdLog === 'function') {
       jdLog('jd_classify', {
         st: namedGaps ? 'skip_gaps_cooling' : 'skip_no_companies',
@@ -508,11 +647,12 @@ async function runClassificationPass(opts) {
     jdLog('jd_classify', {
       st: 'start',
       co: companyNames.length,
+      batch: namesForBatch.length,
       cache: paintedFromCache
     });
   }
   try {
-    // Peindre progressivement dès qu’un chunk / le cache a un type (évite ~10s sans labels).
+    // Peindre progressivement dès qu’un chunk a type (+ légitimité dans le même payload).
     const paintKnown = (typesMap) => {
       let painted = 0;
       for (const [name, cardList] of byCompany) {
@@ -532,15 +672,12 @@ async function runClassificationPass(opts) {
       return painted;
     };
 
-    // Cache mémoire immédiat (entreprises déjà vues).
+    // Cache mémoire immédiat (entreprises déjà vues — pastille si déjà en cache).
     paintKnown({});
 
-    let types = companyNames.length
-      ? await sendClassifyBatch(companyNames, {
+    let types = namesForBatch.length
+      ? await sendClassifyBatch(namesForBatch, {
           onChunk: (part) => {
-            for (const [name, type] of Object.entries(part || {})) {
-              if (type === 'Client' || type === 'SS2I') pnRememberCompanyType(name, type);
-            }
             paintKnown(part);
           }
         })

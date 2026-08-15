@@ -381,6 +381,80 @@ async function swPromoteCompanyLinkedinUrlFromJob(jobOffer, companyType) {
   return swEnsureCompanyLinkedinUrlFromJob(jobOffer, companyType);
 }
 
+/**
+ * Enrichit companies.linkedin_premium_insights depuis le scrape Jobdesk Premium.
+ * Écrit / met à jour à chaque scrape détail qui contient l’encart (données fraîches).
+ */
+async function swUpsertCompanyPremiumInsightsFromJob(jobOffer, companyType) {
+  const companyName = String(jobOffer?.companyName || '').trim();
+  if (!companyName) return { ok: false, error: 'companyName manquant' };
+
+  const detailScrapeDone =
+    jobOffer?.stage === 'details' &&
+    jobOffer?.detailsScrapedAt &&
+    String(jobOffer?.descriptionText || '').trim().length > 0;
+  if (!detailScrapeDone) return { ok: false, error: 'scrape_incomplet' };
+
+  const ld = jobOffer?.linkedinData && typeof jobOffer.linkedinData === 'object' ? jobOffer.linkedinData : {};
+  const insights =
+    ld.details?.premiumCompanyInsights && typeof ld.details.premiumCompanyInsights === 'object'
+      ? ld.details.premiumCompanyInsights
+      : null;
+  if (!insights) return { ok: false, error: 'pas_d_insights_premium' };
+
+  const config = await loadConfig();
+  const baseUrl = String(config.supabaseUrl || '').trim().replace(/\/$/, '');
+  const key = String(config.supabaseAnonKey || '').trim();
+  if (!baseUrl || !key) return { ok: false, error: 'supabase_non_configure' };
+
+  const headers = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    Prefer: 'return=minimal'
+  };
+
+  const now = new Date().toISOString();
+  const payload = sanitizeForPostgres({
+    linkedin_premium_insights: {
+      ...insights,
+      scrapedAt: now,
+      sourceJobId: jobOffer?.linkedinJobId || null,
+      sourceJobUrl: jobOffer?.jobUrl || null
+    },
+    linkedin_premium_insights_at: now,
+    updated_at: now
+  });
+
+  try {
+    let existing = await swFetchCompanyLinkedinFields(companyName);
+    if (!existing) {
+      const type = companyType || jobOffer?.companyType || 'Client';
+      if (typeof upsertCompanyToSupabase === 'function') {
+        await upsertCompanyToSupabase(companyName, type);
+      }
+      existing = await swFetchCompanyLinkedinFields(companyName);
+      if (!existing) return { ok: false, error: 'company_row_missing' };
+    }
+
+    const res = await fetch(
+      `${baseUrl}/rest/v1/${SW_COMPANY_LINKEDIN_TABLE}?company_name=eq.${encodeURIComponent(companyName)}`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(payload)
+      }
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      return { ok: false, error: `patch ${res.status}: ${text.slice(0, 200)}` };
+    }
+    return { ok: true, mode: 'patched' };
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+}
+
 async function swGetCanonicalCompanyLinkedinUrl(companyName) {
   const row = await swFetchCompanyLinkedinFields(companyName);
   return swNormalizeLinkedinCompanyUrl(row?.linkedin_company_url || '');
