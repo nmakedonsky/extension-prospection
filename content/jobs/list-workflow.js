@@ -47,24 +47,8 @@ async function pnRunListWorkflowAfterFullScroll(reason = '') {
       window.pnRepaintVisibleBadgesFromCache();
     }
 
-    // Source de vérité = badges visibles, pas le 1er retour classify (retry dans ensure).
-    if (!badgesReady) {
-      if (typeof jdLog === 'function') {
-        jdLog('jd_wf', {
-          st: 'block_scrape',
-          r: 'badges_incomplete',
-          classifyOk: !!classifyOk
-        });
-      }
-      if (typeof window.jdAbortListWorkflowGate === 'function') {
-        window.jdAbortListWorkflowGate('badges_incomplete');
-      }
-      try {
-        if (typeof pnSetPageStatus === 'function') {
-          pnSetPageStatus('idle', 'Labels incomplets');
-        }
-      } catch (_) {}
-      return;
+    if (!badgesReady && typeof jdLog === 'function') {
+      jdLog('jd_wf', { st: 'soft_badges', classifyOk: !!classifyOk });
     }
 
     // Laisse le DOM peindre avant de lancer les clics

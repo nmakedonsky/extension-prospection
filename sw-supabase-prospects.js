@@ -28,11 +28,39 @@ function pnProspectNonEmpty(v) {
   return v != null && String(v).trim() !== '';
 }
 
+/** Nettoie les chaînes scrapées (null bytes / surrogates isolés → PGRST102). */
+function pnProspectCleanString(s) {
+  let out = String(s || '').replace(/\u0000/g, '');
+  // Surrogates isolés (texte DOM LinkedIn) → JSON invalide côté PostgREST/Postgres.
+  out = out.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g, '');
+  out = out.replace(/(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '$1');
+  return out;
+}
+
+/**
+ * Clone JSON-safe (pas de NaN/Infinity/undefined/bigint/cycles).
+ * Retourne null si impossible.
+ */
+function pnProspectJsonSafeClone(value) {
+  try {
+    return JSON.parse(
+      JSON.stringify(value, (_k, v) => {
+        if (typeof v === 'string') return pnProspectCleanString(v);
+        if (typeof v === 'number' && !Number.isFinite(v)) return null;
+        if (typeof v === 'bigint') return String(v);
+        return v;
+      })
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Fusionne une ligne existante avec le payload extension :
- * - ne vide jamais un champ Waalaxy déjà rempli
+ * - ne vide jamais un champ texte déjà rempli (sauf si incoming non vide)
  * - met à jour last_seen_at + linkedin_profile_json
- * - source reste waalaxy si déjà présent, sinon extension
+ * - source = toujours « extension » après visite extension
  */
 function pnMergeProspectRow(existing, incoming) {
   const now = new Date().toISOString();
@@ -45,15 +73,10 @@ function pnMergeProspectRow(existing, incoming) {
     return null;
   };
 
-  let source = 'extension';
-  if (existing && pnProspectNonEmpty(existing.source)) {
-    source = existing.source === 'waalaxy' ? 'waalaxy' : existing.source;
-  }
-
-  // Ne jamais envoyer null (PostgREST upsert écraserait les champs Waalaxy).
+  // Ne jamais envoyer null (PostgREST upsert écraserait les champs déjà remplis).
   const row = {
     linkedin_url: url,
-    source,
+    source: 'extension',
     last_seen_at: now,
     updated_at: now
   };
@@ -62,7 +85,7 @@ function pnMergeProspectRow(existing, incoming) {
   if (slug) row.linkedin_slug = slug;
 
   const setIf = (key, val) => {
-    if (pnProspectNonEmpty(val)) row[key] = String(val).trim();
+    if (pnProspectNonEmpty(val)) row[key] = pnProspectCleanString(String(val).trim());
   };
 
   // Visite récente : privilégier les champs profil capturés
@@ -76,7 +99,8 @@ function pnMergeProspectRow(existing, incoming) {
   setIf('phone', pick('phone'));
 
   if (incoming.linkedin_profile_json != null) {
-    row.linkedin_profile_json = incoming.linkedin_profile_json;
+    const safeJson = pnProspectJsonSafeClone(incoming.linkedin_profile_json);
+    if (safeJson != null) row.linkedin_profile_json = safeJson;
   }
 
   if (!existing) {
@@ -103,6 +127,30 @@ async function fetchProspectByUrl(supabaseUrl, supabaseKey, linkedinUrl) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
+async function pnPostProspectRow(supabaseUrl, supabaseKey, row) {
+  const body = JSON.stringify(row);
+  if (!body || body === '{}' || body === 'null') {
+    return { ok: false, error: 'empty_json_body', detail: '' };
+  }
+  const res = await fetch(`${supabaseUrl}/rest/v1/${SUPABASE_PROSPECTS_TABLE}?on_conflict=linkedin_url`, {
+    method: 'POST',
+    headers: {
+      apikey: supabaseKey,
+      Authorization: `Bearer ${supabaseKey}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=representation'
+    },
+    body
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    return { ok: false, error: `http_${res.status}`, detail: text.slice(0, 400) };
+  }
+  const parsed = await res.json().catch(() => null);
+  const saved = Array.isArray(parsed) ? parsed[0] : parsed;
+  return { ok: true, saved };
+}
+
 async function upsertLinkedInProspectToSupabase(payload) {
   const cfg = await loadConfig();
   const url = String(cfg.supabaseUrl || '').trim().replace(/\/$/, '');
@@ -117,31 +165,34 @@ async function upsertLinkedInProspectToSupabase(payload) {
     existing = await fetchProspectByUrl(url, key, linkedinUrl);
   } catch (_) {}
 
-  const row = pnMergeProspectRow(existing, { ...payload, linkedin_url: linkedinUrl });
-  if (!row) return { ok: false, error: 'merge_failed' };
+  const merged = pnMergeProspectRow(existing, { ...payload, linkedin_url: linkedinUrl });
+  if (!merged) return { ok: false, error: 'merge_failed' };
 
-  const res = await fetch(`${url}/rest/v1/${SUPABASE_PROSPECTS_TABLE}?on_conflict=linkedin_url`, {
-    method: 'POST',
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates,return=representation'
-    },
-    body: JSON.stringify(row)
-  });
+  const row = pnProspectJsonSafeClone(merged);
+  if (!row) return { ok: false, error: 'json_sanitize_failed' };
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    return { ok: false, error: `http_${res.status}`, detail: text.slice(0, 400) };
+  let result = await pnPostProspectRow(url, key, row);
+  // Retry sans snapshot riche si PostgREST refuse le JSON (PGRST102).
+  if (
+    !result.ok &&
+    row.linkedin_profile_json != null &&
+    (/PGRST102/i.test(String(result.detail || '')) || result.error === 'empty_json_body')
+  ) {
+    const slim = { ...row };
+    delete slim.linkedin_profile_json;
+    result = await pnPostProspectRow(url, key, slim);
+    if (result.ok) result.stripped_json = true;
   }
 
-  const body = await res.json().catch(() => null);
-  const saved = Array.isArray(body) ? body[0] : body;
+  if (!result.ok) {
+    return { ok: false, error: result.error, detail: result.detail };
+  }
+
   return {
     ok: true,
-    id: saved?.id || existing?.id || null,
+    id: result.saved?.id || existing?.id || null,
     created: !existing,
-    linkedin_url: linkedinUrl
+    linkedin_url: linkedinUrl,
+    stripped_json: !!result.stripped_json
   };
 }

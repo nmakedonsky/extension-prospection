@@ -89,6 +89,7 @@ html.pn-path-jobs-collections [componentkey='SearchResultsMainContent'] div[comp
   box-sizing: border-box;
   border: 1px solid rgba(0, 0, 0, 0.18);
   cursor: help;
+  pointer-events: auto;
 }
 
 .pn-legit--real {

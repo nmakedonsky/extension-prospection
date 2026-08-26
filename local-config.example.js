@@ -12,7 +12,7 @@
  * vide le stockage de l’extension (DevTools → Application) ou les champs du popup.
  */
 self.__PN_LOCAL_DEV_CONFIG = {
-  geminiApiKey: '',
+  openRouterApiKey: '',
   supabaseUrl: '',
   supabaseAnonKey: '',
   hubspotApiKey: '',

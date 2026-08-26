@@ -4,8 +4,10 @@ function extractCompanyNameDock(el) {
   if (!el) return '';
   const clone = el.cloneNode(true);
   clone.querySelectorAll?.('.pn-badge').forEach((n) => n.remove());
+  clone.querySelectorAll?.('.pn-legit').forEach((n) => n.remove());
   return String(clone.textContent || '')
     .replace(/\s+/g, ' ')
+    .replace(/\s*(Client|SS2I|…)\s*$/i, '')
     .trim();
 }
 

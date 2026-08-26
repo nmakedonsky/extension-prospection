@@ -55,24 +55,38 @@ async function openFinancialPanelForListedJob(wrapper) {
   const companyEl = findCompanyElementInCardDock(wrapper);
   const companyName = companyEl ? extractCompanyNameDock(companyEl) : '';
   if (!companyName) return;
-  const ens = await ensureCompanyMatchContext(wrapper, companyName);
   const { jobTitle, jobUrl } = getJobInfoFromWrapper(wrapper);
+  // Afficher tout de suite (évite le placeholder « en attente » pendant le match Gemini).
   populateFinancialPanel(companyName, {
     type: t,
     jobTitle,
     jobUrl,
-    companyContext: ens.context,
-    matchContextOk: ens.ok,
-    matchContextMissing: ens.missing,
+    companyContext: null,
+    matchContextOk: false,
+    matchContextMissing: [],
     jobWrapper: wrapper
   });
   const jid = getCurrentJobIdFromPage() || getJobIdFromCardWrapper(wrapper);
   if (jid) syncedFinancialPanelJobId = jid;
+
+  try {
+    const ens = await ensureCompanyMatchContext(wrapper, companyName);
+    if (!wrapper.isConnected) return;
+    populateFinancialPanel(companyName, {
+      type: t,
+      jobTitle,
+      jobUrl,
+      companyContext: ens.context,
+      matchContextOk: ens.ok,
+      matchContextMissing: ens.missing,
+      jobWrapper: wrapper
+    });
+  } catch (_) {}
 }
 
 /**
- * Collections : au refresh une offre est en général déjà sélectionnée — on remplit le dock dès que la carte est classée.
- * Search-results : pas de sélection par défaut après refresh — le dock ne se remplit qu’au clic sur une carte.
+ * Remplit le dock dès qu’une offre Client/SS2I est sélectionnée (URL currentJobId).
+ * Search-results et collections : même comportement (Jobdesk a toujours un currentJobId).
  */
 function trySyncFinancialPanelToUrlSelectedJob() {
   const path = String(location.pathname || '');
@@ -82,7 +96,6 @@ function trySyncFinancialPanelToUrlSelectedJob() {
   }
 
   if (typeof isClassificationTargetPage === 'function' && !isClassificationTargetPage()) return;
-  if (!isJobsCollectionsPathDock()) return;
 
   const jobId = getCurrentJobIdFromPage();
   if (!jobId) {
@@ -92,9 +105,23 @@ function trySyncFinancialPanelToUrlSelectedJob() {
 
   if (syncedFinancialPanelJobId === jobId) return;
 
-  const wrapper = findJobListCardByJobId(jobId);
+  let wrapper = findJobListCardByJobId(jobId);
+  // Jobdesk SDUI : souvent pas de data-job-id — retrouver via componentkey.
+  if (!wrapper?.isConnected) {
+    try {
+      wrapper =
+        document.querySelector(`[componentkey="job-card-component-ref-${jobId}"]`) ||
+        document.querySelector(`[componentkey$="-${jobId}"]`);
+      if (wrapper && typeof isJobCardInListColumn === 'function' && !isJobCardInListColumn(wrapper)) {
+        wrapper = null;
+      }
+    } catch (_) {
+      wrapper = null;
+    }
+  }
   if (!wrapper?.isConnected) return;
 
+  // Carte pas encore classifiée : retenter au prochain tick (ne pas figer synced id).
   if (!wrapper.hasAttribute(DATA_PN_PROCESSED)) return;
 
   const t = wrapper.getAttribute(DATA_PN_TYPE);

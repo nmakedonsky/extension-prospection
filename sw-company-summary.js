@@ -1,6 +1,5 @@
 /**
- * Court résumé d’activité (Gemini) — aide à juger la pertinence d’un prospect (réseau, enseigne, etc.).
- * Réutilise `fgcGeminiGenerateContentOnce` depuis financial-gemini-context.js.
+ * Court résumé d’activité (OpenRouter) — aide à juger la pertinence d’un prospect.
  */
 
 /** Instructions résumé uniquement (bloc matching + image déjà ajoutés par swBuildGeminiPartsWithMatchContext). */
@@ -30,10 +29,9 @@ ${alignBlock}${notes ? `Notes complémentaires (extraction financière) : ${note
 Pas de titre, pas de liste à puces, pas de guillemets englobant tout le texte.`;
 }
 
-function swParseGeminiPlainText(data) {
-  const out = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof out !== 'string') return '';
-  return out
+function swParseSummaryPlainText(raw) {
+  if (typeof raw !== 'string') return '';
+  return raw
     .replace(/\r/g, '')
     .replace(/^\s*#{1,6}\s*/gm, '')
     .trim()
@@ -46,28 +44,29 @@ function swParseGeminiPlainText(data) {
 async function swFetchCompanySummary(
   companyName,
   companyContext,
-  geminiApiKey,
+  openRouterApiKey,
   identificationNotes,
   identifiedCompanyName
 ) {
-  if (!geminiApiKey) return null;
+  if (!openRouterApiKey) return null;
   const instruction = swBuildCompanySummaryInstruction(
     companyName,
     identificationNotes || '',
     identifiedCompanyName || ''
   );
   const parts = swBuildGeminiPartsWithMatchContext(companyName, companyContext || {}, instruction);
-  const requestBody = {
-    contents: [{ parts }],
-    generationConfig: {
-      temperature: 0.25,
-      maxOutputTokens: 512
-    }
-  };
+  const content = orPartsToOpenAIContent(parts);
 
   try {
-    const data = await fgcGeminiGenerateContentOnce(geminiApiKey, requestBody, 'Gemini résumé');
-    const s = swParseGeminiPlainText(data);
+    const data = await orChatCompletion({
+      apiKey: openRouterApiKey,
+      model: OR_MODEL_FAST,
+      messages: [{ role: 'user', content }],
+      temperature: 0.25,
+      maxTokens: 512,
+      label: 'OpenRouter résumé'
+    });
+    const s = swParseSummaryPlainText(orExtractMessageText(data));
     return s || null;
   } catch (err) {
     console.warn('[Prospection SW] Résumé entreprise:', err?.message || err);
@@ -92,8 +91,8 @@ function swIdentifiedCompanyNameFromCached(cached) {
  * Complète un cache ancien sans résumé (un seul appel LLM puis mise à jour locale).
  * @returns {Promise<string|null>}
  */
-async function swEnsureCompanySummaryCached(companyName, companyContext, geminiApiKey, cached) {
-  if (!cached || !geminiApiKey) return null;
+async function swEnsureCompanySummaryCached(companyName, companyContext, openRouterApiKey, cached) {
+  if (!cached || !openRouterApiKey) return null;
   if (cached.companySummary && String(cached.companySummary).trim()) return cached.companySummary;
   const v = swValidateMatchContext(companyContext);
   if (!v.ok) return null;
@@ -102,7 +101,7 @@ async function swEnsureCompanySummaryCached(companyName, companyContext, geminiA
   const summary = await swFetchCompanySummary(
     companyName,
     companyContext,
-    geminiApiKey,
+    openRouterApiKey,
     hints,
     resolvedName
   );

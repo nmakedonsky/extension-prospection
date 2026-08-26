@@ -46,18 +46,28 @@ function setStatus(el, text, kind) {
 
 async function getConfig() {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type: 'GET_CONFIG' }, (res) => {
-      const err = chrome.runtime.lastError;
-      if (err) {
-        reject(new Error(err.message));
-        return;
-      }
-      if (!res || !res.ok) {
-        reject(new Error((res && res.error) || 'Réponse invalide'));
-        return;
-      }
-      resolve(res.config || {});
-    });
+    try {
+      chrome.runtime.sendMessage({ type: 'GET_CONFIG' }, (res) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          reject(
+            new Error(
+              /port closed|receiving end/i.test(err.message || '')
+                ? 'Service worker inactif — recharge l’extension (chrome://extensions).'
+                : err.message
+            )
+          );
+          return;
+        }
+        if (!res || !res.ok) {
+          reject(new Error((res && res.error) || 'Réponse invalide'));
+          return;
+        }
+        resolve(res.config || {});
+      });
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
@@ -82,14 +92,25 @@ async function saveConfig(partial) {
 
 function sendTest(type, payload) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type, ...payload }, (res) => {
-      const err = chrome.runtime.lastError;
-      if (err) {
-        reject(new Error(err.message));
-        return;
-      }
-      resolve(res);
-    });
+    try {
+      chrome.runtime.sendMessage({ type, ...payload }, (res) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          const m = err.message || '';
+          reject(
+            new Error(
+              /port closed|receiving end/i.test(m)
+                ? 'Service worker inactif — recharge l’extension (brave://extensions).'
+                : m
+            )
+          );
+          return;
+        }
+        resolve(res);
+      });
+    } catch (e) {
+      reject(e);
+    }
   });
 }
 
@@ -232,7 +253,12 @@ async function openSavedSearch(index) {
 
 async function loadApiFields() {
   const config = await getConfig();
-  $('geminiKey').value = config.geminiApiKey || '';
+  $('openRouterKey').value = (() => {
+    const or = String(config.openRouterApiKey || '').trim();
+    if (or) return or;
+    const legacy = String(config.geminiApiKey || '').trim();
+    return legacy.startsWith('sk-or-') ? legacy : '';
+  })();
   $('supabaseUrl').value = config.supabaseUrl || '';
   $('supabaseKey').value = config.supabaseAnonKey || '';
   $('hubspotKey').value = config.hubspotApiKey || '';
@@ -255,26 +281,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  $('saveGemini').addEventListener('click', async () => {
-    const el = $('geminiStatus');
+  $('saveOpenRouter').addEventListener('click', async () => {
+    const el = $('openRouterStatus');
     try {
-      await saveConfig({ geminiApiKey: $('geminiKey').value.trim() });
-      setStatus(el, 'Gemini : configuration enregistrée.', 'ok');
+      await saveConfig({ openRouterApiKey: $('openRouterKey').value.trim() });
+      setStatus(el, 'OpenRouter : configuration enregistrée.', 'ok');
     } catch (e) {
       setStatus(el, String(e.message || e), 'err');
     }
   });
 
-  $('testGemini').addEventListener('click', async () => {
-    const el = $('geminiStatus');
+  $('testOpenRouter').addEventListener('click', async () => {
+    const el = $('openRouterStatus');
     setStatus(el, 'Test en cours…', '');
     try {
-      const key = $('geminiKey').value.trim();
-      const r = await sendTest('TEST_GEMINI', { apiKey: key });
+      const key = $('openRouterKey').value.trim();
+      const r = await sendTest('TEST_OPENROUTER', { apiKey: key });
       if (r.ok) {
-        setStatus(el, 'Gemini : connexion OK.', 'ok');
+        setStatus(el, 'OpenRouter : connexion OK.', 'ok');
       } else {
-        setStatus(el, `Gemini : échec — ${r.error || 'erreur inconnue'}`, 'err');
+        setStatus(el, `OpenRouter : échec — ${r.error || 'erreur inconnue'}`, 'err');
       }
     } catch (e) {
       setStatus(el, String(e.message || e), 'err');

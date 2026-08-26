@@ -1,5 +1,6 @@
 /**
- * Shared Gemini + Google Search legitimacy probe (bench + backfill).
+ * Shared OpenRouter legitimacy probe (bench + backfill).
+ * Recherche web via plugin OpenRouter `web` (remplace Google Search grounding Gemini).
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -8,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const ROOT = join(__dirname, '../..');
 
-export const MODEL = process.env.LEGITIMACY_MODEL || 'gemini-2.5-flash';
-export const BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+export const MODEL = process.env.LEGITIMACY_MODEL || 'google/gemini-2.5-flash';
+export const OR_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 export const DELAY_MS = Number(process.env.LEGITIMACY_DELAY_MS || 1200);
 
 export const VERDICTS = new Set(['real', 'recruiter', 'shell', 'uncertain']);
@@ -47,13 +48,21 @@ Large listed Indian IT (Infosys, TCS, Wipro, HCLTech, Cognizant, Tech Mahindra) 
 
 Do not invent registry numbers or URLs you did not see. Prefer uncertain over a wrong shell.`;
 
-export function loadGeminiKey() {
-  const env = String(process.env.GEMINI_API_KEY || '').trim();
+export function loadOpenRouterKey() {
+  const env = String(process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || '').trim();
   if (env) return env;
   const raw = readFileSync(join(ROOT, 'local-config.js'), 'utf8');
-  const m = raw.match(/geminiApiKey:\s*'([^']+)'/);
-  if (!m?.[1]) throw new Error('Pas de clé Gemini (GEMINI_API_KEY ou local-config.js)');
+  const m =
+    raw.match(/openRouterApiKey:\s*'([^']+)'/) || raw.match(/geminiApiKey:\s*'([^']+)'/);
+  if (!m?.[1]) {
+    throw new Error('Pas de clé OpenRouter (OPENROUTER_API_KEY ou openRouterApiKey dans local-config.js)');
+  }
   return m[1];
+}
+
+/** @deprecated use loadOpenRouterKey */
+export function loadGeminiKey() {
+  return loadOpenRouterKey();
 }
 
 export function loadLocalConfig() {
@@ -63,8 +72,18 @@ export function loadLocalConfig() {
     return m?.[1] ? String(m[1]).trim() : '';
   };
   return {
-    geminiApiKey: pick('geminiApiKey') || String(process.env.GEMINI_API_KEY || '').trim(),
-    supabaseUrl: (pick('supabaseUrl') || String(process.env.SUPABASE_URL || '').trim()).replace(/\/$/, ''),
+    openRouterApiKey:
+      pick('openRouterApiKey') ||
+      pick('geminiApiKey') ||
+      String(process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || '').trim(),
+    geminiApiKey:
+      pick('openRouterApiKey') ||
+      pick('geminiApiKey') ||
+      String(process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY || '').trim(),
+    supabaseUrl: (pick('supabaseUrl') || String(process.env.SUPABASE_URL || '').trim()).replace(
+      /\/$/,
+      ''
+    ),
     supabaseAnonKey:
       pick('supabaseAnonKey') ||
       pick('supabaseKey') ||
@@ -83,17 +102,26 @@ export function parseJsonFromModel(text) {
   return JSON.parse(cleaned.slice(first, last + 1));
 }
 
-export function extractCandidateText(data) {
-  const cand = data?.candidates?.[0] || {};
-  const parts = cand?.content?.parts || [];
-  const text = parts
-    .map((p) => (typeof p.text === 'string' ? p.text : ''))
-    .join('\n')
-    .trim();
+export function extractMessageText(data) {
+  const msg = data?.choices?.[0]?.message;
+  if (!msg) return { text: '', finishReason: data?.choices?.[0]?.finish_reason || null };
+  let text = '';
+  if (typeof msg.content === 'string') text = msg.content;
+  else if (Array.isArray(msg.content)) {
+    text = msg.content
+      .map((p) => (typeof p?.text === 'string' ? p.text : typeof p === 'string' ? p : ''))
+      .join('\n')
+      .trim();
+  }
   return {
     text,
-    finishReason: cand.finishReason || data?.promptFeedback?.blockReason || null
+    finishReason: data?.choices?.[0]?.finish_reason || null
   };
+}
+
+/** @deprecated */
+export function extractCandidateText(data) {
+  return extractMessageText(data);
 }
 
 export function userPrompt(c) {
@@ -105,30 +133,34 @@ export function userPrompt(c) {
 Investigate this employer and return the JSON.`;
 }
 
-export function buildRequest(companyCase, { retryJson } = {}) {
+export function buildMessages(companyCase, { retryJson } = {}) {
   const userText = retryJson
     ? `${userPrompt(companyCase)}\n\nIMPORTANT: Your previous reply had no JSON. Reply with the JSON object only, no prose.`
     : userPrompt(companyCase);
-  return {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{ role: 'user', parts: [{ text: userText }] }],
-    tools: [{ google_search: {} }],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 4096,
-      thinkingConfig: { thinkingBudget: 0 }
-    }
-  };
+  return [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: userText }
+  ];
 }
 
-export async function callGemini(apiKey, companyCase) {
-  const url = `${BASE}/${MODEL}:generateContent?key=${encodeURIComponent(apiKey)}`;
+export async function callOpenRouter(apiKey, companyCase) {
   let lastErr = null;
   for (const retryJson of [false, true]) {
-    const res = await fetch(url, {
+    const res = await fetch(OR_CHAT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildRequest(companyCase, { retryJson }))
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://github.com/prospection-extension',
+        'X-Title': 'Prospection legitimacy bench'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: buildMessages(companyCase, { retryJson }),
+        temperature: 0.1,
+        max_tokens: 4096,
+        plugins: [{ id: 'web', max_results: 8 }]
+      })
     });
     const raw = await res.text();
     if (!res.ok) {
@@ -142,16 +174,26 @@ export async function callGemini(apiKey, companyCase) {
       lastErr = new Error('Réponse HTTP non JSON');
       continue;
     }
-    const { text, finishReason } = extractCandidateText(data);
+    const { text, finishReason } = extractMessageText(data);
     try {
       const parsed = parseJsonFromModel(text);
-      const queries = data?.candidates?.[0]?.groundingMetadata?.webSearchQueries || [];
+      const annotations = data?.choices?.[0]?.message?.annotations || [];
+      const queries = annotations
+        .filter((a) => a?.type === 'url_citation' || a?.url)
+        .map((a) => a.url || a?.url_citation?.url)
+        .filter(Boolean)
+        .slice(0, 12);
       return { parsed, searchQueries: queries, model: MODEL, finishReason };
     } catch (e) {
       lastErr = new Error(`${e.message} (finish=${finishReason || '?'})`);
     }
   }
-  throw lastErr || new Error('Gemini a échoué');
+  throw lastErr || new Error('OpenRouter a échoué');
+}
+
+/** @deprecated use callOpenRouter */
+export async function callGemini(apiKey, companyCase) {
+  return callOpenRouter(apiKey, companyCase);
 }
 
 export function normalizeVerdict(v) {

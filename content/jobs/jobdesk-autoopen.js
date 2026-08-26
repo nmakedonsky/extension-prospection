@@ -35,10 +35,17 @@ const JD_SCROLL_ROOT_SELECTORS = [
   '[class*="scaffold-layout__list"]',
   'main[role="main"]'
 ];
+/**
+ * Une page liste = un `start=` (après sanitization des params de clic).
+ * idle  → pas de labels / pastilles, statut « En attente »
+ * ready → scroll bas fait : classify, labels, puis scrape
+ * Clic d’offre (start= disparaît, eBP, currentJobId) = flap d’URL, pas une nouvelle page.
+ * Seul jdResetUiForNewListPage retire les labels — jamais le tick MutationObserver.
+ */
 const JD_FULLY_SCROLLED_LIST_KEYS = new Set();
-/** Workflow badges→clics en cours pour cette lk (gate validé seulement après classify OK). */
+/** Verrou classify en cours (clé sans start) : un seul workflow, y compris pendant un flap d’URL. */
 const JD_WORKFLOW_IN_FLIGHT_KEYS = new Set();
-/** Liste (lk) pour laquelle l’utilisateur a scrollé le panneau jobs (évite badges avant scroll). */
+/** L’utilisateur a scrollé cette page (évite de lancer le workflow trop tôt). */
 const JD_LIST_USER_SCROLLED_KEYS = new Set();
 const JD_OPENED_CLIENT_IDS_BY_LIST_KEY = new Map();
 
@@ -69,7 +76,13 @@ const JD_VOLATILE_JOBS_QUERY_PARAMS = [
   'alertAction',
   'saved',
   'isWaitingSubmission',
-  'storeCtaType'
+  'storeCtaType',
+  // Tracking / session — changent au clic et cassaient le gate si inclus dans la clé.
+  'referralSearchId',
+  'searchId',
+  'originToLandingJobPostings',
+  'howYouFit',
+  'showHowYouFit'
 ];
 
 function jdSanitizeJobsSearchParams(sp, { dropStart = false } = {}) {
@@ -88,6 +101,16 @@ function jdSanitizeJobsSearchParams(sp, { dropStart = false } = {}) {
 }
 
 /**
+ * Clé liste stable. Ne PAS tronquer : un `.slice(0, 200)` coupait `f_SAL=…` au milieu ;
+ * au clic LinkedIn retire `start=` → la clé tronquée changeait → faux « new page »
+ * → strip badges + « En attente » en plein scrape.
+ */
+function jdFormatListKey(pathname, sp) {
+  const qs = sp && sp.toString ? sp.toString() : '';
+  return `${pathname || ''}${qs ? `?${qs}` : ''}`;
+}
+
+/**
  * Clé complète par page LinkedIn (incluant `start`, sans params volatils de clic).
  * Utilisée pour le gate "done" (JD_FULLY_SCROLLED_LIST_KEYS) : chaque page paginée a son propre gate.
  */
@@ -95,24 +118,21 @@ function jdListPageKey() {
   try {
     const u = new URL(location.href);
     const sp = jdSanitizeJobsSearchParams(new URLSearchParams(u.search));
-    const qs = sp.toString();
-    return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
+    return jdFormatListKey(u.pathname || '', sp);
   } catch (_) {
     return '';
   }
 }
 
 /**
- * Clé de base sans `start` — utilisée uniquement pour JD_WORKFLOW_IN_FLIGHT_KEYS.
- * Pendant le scroll d'une liste, LinkedIn change start=0→25→50→75 ; cette clé reste stable
- * et empêche les workflows en rafale sans bloquer les vraies pages suivantes.
+ * Clé sans `start` — verrou in-flight seulement.
+ * Un flap d’URL (start qui disparaît au clic) ne doit pas relancer un 2e workflow.
  */
 function jdListBaseKey() {
   try {
     const u = new URL(location.href);
     const sp = jdSanitizeJobsSearchParams(new URLSearchParams(u.search), { dropStart: true });
-    const qs = sp.toString();
-    return `${u.pathname || ''}${qs ? `?${qs}` : ''}`.slice(0, 200);
+    return jdFormatListKey(u.pathname || '', sp);
   } catch (_) {
     return '';
   }
@@ -186,18 +206,16 @@ function jdPruneSmallSet(s, max = 12) {
 function jdClearListGatingState(lk) {
   if (!lk) return;
   JD_FULLY_SCROLLED_LIST_KEYS.delete(lk);
-  // In-flight uses base key (without start) — delete both to be safe
   JD_WORKFLOW_IN_FLIGHT_KEYS.delete(lk);
   JD_WORKFLOW_IN_FLIGHT_KEYS.delete(jdListBaseKey());
   JD_LIST_USER_SCROLLED_KEYS.delete(lk);
 }
 
-/** Classification ou workflow interrompu : permet de relancer sans recharger la page. */
+/** Interrompt le verrou in-flight. Ne retire pas « fully scrolled » (les labels restent). */
 function jdAbortListWorkflowGate(reason = '') {
   const lk = jdListPageKey();
   const bk = jdListBaseKey();
   if (!lk) return;
-  JD_FULLY_SCROLLED_LIST_KEYS.delete(lk);
   JD_WORKFLOW_IN_FLIGHT_KEYS.delete(bk);
   jdLog('jd_classify', { st: 'abort', r: String(reason || '').slice(0, 48), lk: lk.slice(0, 120) });
 }
@@ -315,12 +333,55 @@ function jdListKeyStartRaw(lk) {
   }
 }
 
+function jdListKeyStartNum(lk) {
+  return parseInt(jdListKeyStartRaw(lk) || '0', 10) || 0;
+}
+
+/**
+ * Pagination LinkedIn (start 0→25) vs flap d’URL au clic (start=25 disparaît).
+ * - Perte de start= → flap, on garde les gates.
+ * - Retour vers un start déjà « done » → flap.
+ * - Saut de ≥ 10 vers un start inconnu → nouvelle page.
+ */
+function jdIsRealPagination(prevLk, nextLk) {
+  if (!prevLk || !nextLk) return false;
+  const prevN = jdListKeyStartNum(prevLk);
+  const nextN = jdListKeyStartNum(nextLk);
+  if (prevN === nextN) return false;
+  const nextRaw = jdListKeyStartRaw(nextLk);
+  if (jdListKeyStartRaw(prevLk) && !nextRaw) return false;
+  if (nextRaw) {
+    const canon = jdCanonicalListKeyFromLk(nextLk);
+    for (const k of JD_FULLY_SCROLLED_LIST_KEYS) {
+      if (jdCanonicalListKeyFromLk(k) === canon && jdListKeyStartRaw(k) === nextRaw) {
+        return false;
+      }
+    }
+  }
+  return Math.abs(nextN - prevN) >= 10;
+}
+
+function jdResetUiForNewListPage() {
+  try {
+    if (typeof jdAbortAutoOpenForUserNavigation === 'function') {
+      jdAbortAutoOpenForUserNavigation('new-list-page', { pauseMs: 0 });
+    }
+  } catch (_) {}
+  try {
+    if (typeof window.pnStripVisibleListBadges === 'function') {
+      window.pnStripVisibleListBadges();
+    }
+  } catch (_) {}
+  try {
+    pnSetPageStatus('idle', 'En attente');
+  } catch (_) {}
+}
+
 function jdIsCurrentListFullyScrolled() {
   const lk = jdListPageKey();
   if (!lk) return false;
   if (JD_FULLY_SCROLLED_LIST_KEYS.has(lk)) return true;
-  // LinkedIn retire souvent `start=` pendant les clics Jobdesk : le gate reste sur
-  // `…&start=25` alors que l’URL courante n’a plus le param → sans heal, tick strip les labels.
+  // Clic Jobdesk : LinkedIn retire souvent start= ; le gate reste sur …&start=25.
   const canon = jdCanonicalListKeyFromLk(lk);
   if (!canon) return false;
   const curStart = jdListKeyStartRaw(lk);
@@ -351,7 +412,12 @@ function jdMarkCurrentListFullyScrolled(reason = '') {
   JD_FULLY_SCROLLED_LIST_KEYS.add(lk);
   jdLog('jd_gate', { lk, y: 'open', r: String(reason || '').slice(0, 60) });
   try {
-    pnSetPageStatus('idle', 'Attente');
+    // Ne pas écraser un statut running / ready déjà affiché.
+    const el = document.getElementById('pn-page-status');
+    const cur = el?.getAttribute?.('data-state');
+    if (cur !== 'running' && cur !== 'ready') {
+      pnSetPageStatus('idle', 'Prêt');
+    }
   } catch (_) {}
   return true;
 }
@@ -377,41 +443,36 @@ function jdTryKickWorkflowAfterScrollHook(reason = '') {
       if (jdHasReachedBottomForCurrentList()) jdOnListScrollFinished();
       return;
     }
-    const root = jdGetLikelyJobsListScrollRoot();
-    if (!root) return;
-    const noScrollNeeded = jdListHasNoScrollNeeded();
-    const atBottom = jdHasReachedBottomForCurrentList();
-    if (!noScrollNeeded && !atBottom) return;
-    const overflow = root.scrollHeight - root.clientHeight;
-    const st = Number(root.scrollTop) || 0;
-    // Liste scrollable : exiger un scrollTop > 0 (restauration SPA) sauf si vraiment sans overflow
-    if (!noScrollNeeded && st <= 1) return;
+    if (!jdListHasNoScrollNeeded()) return;
     jdNoteListScrollActivity();
     jdOnListScrollFinished();
     if (reason && typeof jdLog === 'function') {
-      jdLog('jd_boot', {
-        r: String(reason || '').slice(0, 48),
-        st: Math.round(st),
-        ov: Math.round(overflow),
-        nosc: !!noScrollNeeded
-      });
+      jdLog('jd_boot', { r: String(reason || '').slice(0, 48), nosc: 1 });
     }
   } catch (_) {}
 }
 
-/** Entrée SPA /jobs/* : rebrancher le scroll root + kicks différés (liste monte après pushState). */
+/** Entrée SPA /jobs/* : rebrancher le scroll root. Ignore les flaps d’URL (clic d’offre). */
 let __jdWakeSpaTimer = null;
-let __jdWakeLastCanonical = '';
+let __jdWakeLastLk = '';
 function jdWakeAfterSpaPathChange(reason = '') {
   try {
     if (typeof isClassificationTargetPage !== 'function' || !isClassificationTargetPage()) return;
-    const canon = jdCanonicalListKeyFromLk(jdListPageKey()) || '';
+    const prevLk = __jdWakeLastLk;
     mergeSeenClientJobsFromDom();
-    // Même recherche (seul currentJobId / eBP change) → ne pas re-kick (bloque le Jobdesk).
-    if (__jdWakeLastCanonical && canon && __jdWakeLastCanonical === canon) return;
-    __jdWakeLastCanonical = canon;
+    const lk = jdListPageKey();
+    if (!lk) return;
+    if (prevLk === lk) return;
+    if (
+      prevLk &&
+      jdIsStartOnlyListKeyChange(prevLk, lk) &&
+      !jdIsRealPagination(prevLk, lk)
+    ) {
+      __jdWakeLastLk = lk;
+      return;
+    }
+    __jdWakeLastLk = lk;
 
-    __jdScrollRootHooked = null;
     jdEnsureListScrollRootListener(reason || 'spa-wake');
     jdTryKickWorkflowAfterScrollHook(reason || 'spa-wake');
     if (__jdWakeSpaTimer) clearTimeout(__jdWakeSpaTimer);
@@ -426,8 +487,8 @@ function jdWakeAfterSpaPathChange(reason = '') {
   } catch (_) {}
 }
 
-/** Arrête l’auto-open si l’utilisateur clique manuellement une offre (ne pas lutter avec LinkedIn). */
-function jdAbortAutoOpenForUserNavigation(reason = '') {
+/** Coupe l’auto-open en cours. `pauseMs` (défaut 8000) : délai avant un nouveau scrape auto (clic user). */
+function jdAbortAutoOpenForUserNavigation(reason = '', opts = {}) {
   try {
     openClientJobsSequenceRunning = false;
     autoOpenRunQueued = false;
@@ -436,7 +497,8 @@ function jdAbortAutoOpenForUserNavigation(reason = '') {
       autoOpenCoalesceTimer = null;
     }
     deferredAutoOpenWhileTabHidden = false;
-    autoOpenDisabledUntil = Date.now() + 8000;
+    const pauseMs = Number(opts?.pauseMs);
+    autoOpenDisabledUntil = Date.now() + (Number.isFinite(pauseMs) ? pauseMs : 8000);
     jdLog('jd_nav', { r: 'user-abort-auto', why: String(reason || '').slice(0, 40) });
   } catch (_) {}
 }
@@ -532,10 +594,7 @@ function jdEnsureListScrollRootListener(hookReason = '') {
   return root;
 }
 
-/** Démarre le workflow (badges → clics Client/SS2I), une fois par page après scroll complet.
- *  - JD_FULLY_SCROLLED_LIST_KEYS  : gate par page complète (lk avec start) → page 2, 3... peuvent passer
- *  - JD_WORKFLOW_IN_FLIGHT_KEYS   : verrou pendant le classify (bk sans start) → évite doublons pendant scroll
- */
+/** Une fois par page : scroll bas → classify → scrape. */
 function jdTryStartListWorkflow(reason = '') {
   if (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) {
     return false;
@@ -548,7 +607,7 @@ function jdTryStartListWorkflow(reason = '') {
   const lk = jdListPageKey();
   const bk = jdListBaseKey();
   if (!lk) return false;
-  if (JD_FULLY_SCROLLED_LIST_KEYS.has(lk)) return false;
+  if (jdIsCurrentListFullyScrolled()) return false;
   if (JD_WORKFLOW_IN_FLIGHT_KEYS.has(bk)) return false;
   if (typeof window.pnRunListWorkflowAfterFullScroll !== 'function') {
     jdLog('jd_fail', { m: 'no_workflow_fn', r: String(reason || '').slice(0, 48) });
@@ -695,75 +754,49 @@ function mergeSeenClientJobsFromDom() {
   let listKeyChanged = false;
   if (jdMergeLastLk && jdMergeLastLk !== lk) {
     if (jdIsStartOnlyListKeyChange(jdMergeLastLk, lk)) {
-      // Soft : LinkedIn a bougé start= / eBP= / currentJobId — garder badges + gates.
-      const prevStart = (() => {
-        try {
-          return new URLSearchParams(String(jdMergeLastLk).split('?')[1] || '').get('start') || '0';
-        } catch (_) {
-          return '0';
-        }
-      })();
-      const nextStart = (() => {
-        try {
-          return new URLSearchParams(String(lk).split('?')[1] || '').get('start') || '0';
-        } catch (_) {
-          return '0';
-        }
-      })();
-      const startChanged = prevStart !== nextStart;
-      if (startChanged) {
-        // LinkedIn bascule souvent start= (absent ↔ 25) à chaque clic d’offre pendant le scrape.
-        // Ne jamais strip / reset le gate mid-sequence — sinon labels reload + cancels en cascade.
-        const seqRunning =
-          typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning;
-        const prevN = parseInt(prevStart, 10) || 0;
-        const nextN = parseInt(nextStart, 10) || 0;
-        const prevFullyScrolled = JD_FULLY_SCROLLED_LIST_KEYS.has(jdMergeLastLk);
-        // Pagination réelle : start augmente clairement (page N → N+1), hors scrape.
-        const realForwardPage =
-          !seqRunning && prevFullyScrolled && nextN > prevN && nextN - prevN >= 10;
-        if (realForwardPage) {
-          jdClearListGatingState(lk);
-          try {
-            if (typeof window.pnStripVisibleListBadges === 'function') {
-              window.pnStripVisibleListBadges();
-            }
-          } catch (_) {}
-          jdLog('jd_nav', {
-            r: 'start-soft-newpage',
-            from: String(jdMergeLastLk).slice(0, 100),
-            to: String(lk).slice(0, 100)
-          });
-        } else {
-          jdCarryScrollGatesAcrossStartChange(jdMergeLastLk, lk);
-          if (JD_LIST_USER_SCROLLED_KEYS.has(jdMergeLastLk)) {
-            jdPruneSmallSet(JD_LIST_USER_SCROLLED_KEYS, 12);
-            JD_LIST_USER_SCROLLED_KEYS.add(lk);
-          }
-          jdLog('jd_nav', {
-            r: seqRunning ? 'start-soft-seq-hold' : 'start-soft',
-            from: String(jdMergeLastLk).slice(0, 100),
-            to: String(lk).slice(0, 100)
-          });
-        }
+      if (jdIsRealPagination(jdMergeLastLk, lk)) {
+        jdClearListGatingState(jdMergeLastLk);
+        jdClearListGatingState(lk);
+        jdResetUiForNewListPage();
+        jdLog('jd_nav', {
+          r: 'newpage',
+          from: String(jdMergeLastLk).slice(0, 100),
+          to: String(lk).slice(0, 100)
+        });
       } else {
-        // Clic offre (eBP / currentJobId) : ne jamais strip les badges.
         jdCarryScrollGatesAcrossStartChange(jdMergeLastLk, lk);
         jdLog('jd_nav', {
-          r: 'volatile-soft',
+          r: 'url-flap',
           from: String(jdMergeLastLk).slice(0, 100),
           to: String(lk).slice(0, 100)
         });
       }
     } else {
-      const prevSk = jdStripStartFromListKey(jdMergeLastLk) || jdMergeLastLk;
-      flushAccumulatedClientJobIdsForListKey(prevSk, 'list-url-changed');
-      flushLastSeenTouchForListKey(prevSk, 'list-url-changed');
-      jdClearListGatingState(jdMergeLastLk);
-      // Nouvelle recherche / autre collection : force un re-scroll sur la destination.
-      jdClearListGatingState(lk);
-      __jdScrollRootHooked = null;
-      listKeyChanged = true;
+      // Pendant classify/scrape : ne jamais stripper (bruit d’URL LinkedIn ≠ nouvelle recherche).
+      const busy =
+        (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) ||
+        (typeof pnListWorkflowRunning !== 'undefined' && pnListWorkflowRunning);
+      if (busy) {
+        jdCarryScrollGatesAcrossStartChange(jdMergeLastLk, lk);
+        jdLog('jd_nav', {
+          r: 'url-flap-busy',
+          from: String(jdMergeLastLk).slice(0, 100),
+          to: String(lk).slice(0, 100)
+        });
+      } else {
+        const prevSk = jdStripStartFromListKey(jdMergeLastLk) || jdMergeLastLk;
+        flushAccumulatedClientJobIdsForListKey(prevSk, 'list-url-changed');
+        flushLastSeenTouchForListKey(prevSk, 'list-url-changed');
+        jdClearListGatingState(jdMergeLastLk);
+        jdClearListGatingState(lk);
+        listKeyChanged = true;
+        jdResetUiForNewListPage();
+        jdLog('jd_nav', {
+          r: 'newpage-hard',
+          from: String(jdMergeLastLk).slice(0, 100),
+          to: String(lk).slice(0, 100)
+        });
+      }
     }
   }
   // Clients : compteur + pending par page (clé avec start=) — pas de cumul 0→175.
@@ -1711,10 +1744,7 @@ const debouncedAutoOpenOnMutation = debounce(() => {
 function installPnHistoryAutoOpenListener() {
   if (window.__pnHistoryAutoOpenListener) return;
   window.__pnHistoryAutoOpenListener = true;
-  let lastCanon = '';
-  let lastStart = '';
   const onPathChange = () => {
-    // Navigation hors liste jobs (help, company/life…) : couper l’auto-open immédiatement.
     if (!isJobsListSpaPath()) {
       try {
         if (openClientJobsSequenceRunning && typeof pnCancelActiveJobScrape === 'function') {
@@ -1728,35 +1758,12 @@ function installPnHistoryAutoOpenListener() {
         }
         jdLog('jd_nav', { r: 'left-jobs-abort', path: String(location.pathname || '').slice(0, 80) });
       } catch (_) {}
-      lastCanon = '';
-      lastStart = '';
-      return;
-    }
-    let canon = '';
-    let start = '0';
-    try {
-      const lk = jdListPageKey();
-      canon = jdCanonicalListKeyFromLk(lk) || '';
-      start = new URLSearchParams(String(lk).split('?')[1] || '').get('start') || '0';
-    } catch (_) {}
-    const sameList = lastCanon && canon && lastCanon === canon;
-    const sameStart = lastStart === start;
-    lastCanon = canon || lastCanon;
-    lastStart = start;
-    const seqRunning =
-      typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning;
-    // Clic job (eBP/currentJobId) ou flap start= pendant scrape : merge seulement — pas de wake/kick.
-    if (sameList && (sameStart || seqRunning)) {
-      try {
-        mergeSeenClientJobsFromDom();
-      } catch (_) {}
       return;
     }
     if (typeof jdWakeAfterSpaPathChange === 'function') {
-      jdWakeAfterSpaPathChange(sameList ? 'spa-start' : 'spa-nav');
+      jdWakeAfterSpaPathChange('spa-nav');
     } else {
       mergeSeenClientJobsFromDom();
-      __jdScrollRootHooked = null;
       jdEnsureListScrollRootListener('spa-nav');
       jdTryKickWorkflowAfterScrollHook('spa-nav-sync');
     }

@@ -23,14 +23,15 @@
     <div class="settings-inner">
 
       <section class="block">
-        <h2>Gemini</h2>
-        <label for="geminiKey">Clé API (Google AI Studio)</label>
-        <input type="password" id="geminiKey" autocomplete="off" placeholder="AIza…">
+        <h2>OpenRouter</h2>
+        <p class="hint">Point d’entrée unique LLM (classify, finance, résumé). Clé sur <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</p>
+        <label for="openRouterKey">Clé API</label>
+        <input type="password" id="openRouterKey" autocomplete="off" placeholder="sk-or-…">
         <div class="row">
-          <button type="button" id="saveGemini" class="secondary">Enregistrer</button>
-          <button type="button" id="testGemini">Tester</button>
+          <button type="button" id="saveOpenRouter" class="secondary">Enregistrer</button>
+          <button type="button" id="testOpenRouter">Tester</button>
         </div>
-        <p id="geminiStatus" class="status" aria-live="polite"></p>
+        <p id="openRouterStatus" class="status" aria-live="polite"></p>
       </section>
 
       <section class="block">

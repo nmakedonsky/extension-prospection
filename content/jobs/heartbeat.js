@@ -8,13 +8,18 @@ function sendHeartbeat(payload, forceLog) {
   const shouldLog = forceLog || now - lastLogAt >= LOG_INTERVAL_MS;
   if (shouldLog) lastLogAt = now;
   try {
-    chrome.runtime.sendMessage({
-      type: 'JOBS_PAGE_HEARTBEAT',
-      payload: {
-        ...payload,
-        pageUrl: String(location.href || '').slice(0, 800),
-        logToSupabase: shouldLog
+    chrome.runtime.sendMessage(
+      {
+        type: 'JOBS_PAGE_HEARTBEAT',
+        payload: {
+          ...payload,
+          pageUrl: String(location.href || '').slice(0, 800),
+          logToSupabase: shouldLog
+        }
+      },
+      () => {
+        void chrome.runtime.lastError;
       }
-    });
+    );
   } catch (_) {}
 }

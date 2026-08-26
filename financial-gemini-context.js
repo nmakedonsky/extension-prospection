@@ -1,60 +1,7 @@
 /**
- * Extraction financière via Gemini à partir du contexte LinkedIn (logo image + texte).
- * sw-company-match-prompt.js doit être chargé avant ce fichier.
+ * Extraction financière via OpenRouter (modèle Gemini) à partir du contexte LinkedIn.
+ * sw-company-match-prompt.js + sw-openrouter.js doivent être chargés avant ce fichier.
  */
-/** Modèle unique extraction / résumé financiers (Google AI `generativelanguage` v1beta). */
-const FGC_GEMINI_MODEL_ID = 'gemini-2.5-flash-lite';
-const FGC_GEMINI_TRANSIENT_MAX_RETRIES = 1;
-const FGC_GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-
-async function fgcGeminiGenerateContentOnce(apiKey, requestBody, label) {
-  const url = `${FGC_GEMINI_BASE}/${FGC_GEMINI_MODEL_ID}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  let lastError = null;
-  for (let attempt = 0; attempt <= FGC_GEMINI_TRANSIENT_MAX_RETRIES; attempt++) {
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        lastError = new Error(`${label} ${FGC_GEMINI_MODEL_ID} ${response.status}: ${text.slice(0, 200)}`);
-        const transient = response.status === 429 || response.status === 500 || response.status === 503;
-        if (transient && attempt < FGC_GEMINI_TRANSIENT_MAX_RETRIES) {
-          await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
-          continue;
-        }
-        throw lastError;
-      }
-      return JSON.parse(text);
-    } catch (err) {
-      lastError = err;
-      const msg = String(err?.message || err);
-      const m = /\bgemini-[\w.-]+\s+(\d{3})\b/.exec(msg);
-      const status = m ? Number(m[1]) : null;
-      const transient = status === 429 || status === 500 || status === 503;
-      if (transient && attempt < FGC_GEMINI_TRANSIENT_MAX_RETRIES) {
-        await new Promise((r) => setTimeout(r, 450 * (attempt + 1)));
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastError || new Error(`${label}: Gemini ${FGC_GEMINI_MODEL_ID} a échoué`);
-}
-
-function parseGeminiCandidateJson(data) {
-  const out = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  const cleaned = out.replace(/```json/gi, '').replace(/```/g, '').trim();
-  const firstBrace = cleaned.indexOf('{');
-  const lastBrace = cleaned.lastIndexOf('}');
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-    throw new Error('Gemini extraction JSON introuvable');
-  }
-  const jsonSlice = cleaned.slice(firstBrace, lastBrace + 1);
-  return JSON.parse(jsonSlice);
-}
 
 /** Instructions + schéma JSON uniquement (le bloc matching est ajouté par swBuildGeminiPartsWithMatchContext). */
 function buildFinancialExtractionInstructions(companyName) {
@@ -108,18 +55,23 @@ Retourne UNIQUEMENT un JSON valide :
 }`;
 }
 
-async function extractFinancialFromCompanyContext(companyName, companyContext, geminiApiKey) {
-  if (!geminiApiKey) return null;
+/**
+ * @param {string} companyName
+ * @param {object} companyContext
+ * @param {string} openRouterApiKey
+ */
+async function extractFinancialFromCompanyContext(companyName, companyContext, openRouterApiKey) {
+  if (!openRouterApiKey) return null;
   const instruction = buildFinancialExtractionInstructions(companyName);
   const parts = swBuildGeminiPartsWithMatchContext(companyName, companyContext || {}, instruction);
-  const requestBody = {
-    contents: [{ parts }],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 2800
-    }
-  };
-
-  const data = await fgcGeminiGenerateContentOnce(geminiApiKey, requestBody, 'Gemini context extraction');
-  return parseGeminiCandidateJson(data);
+  const content = orPartsToOpenAIContent(parts);
+  const data = await orChatCompletion({
+    apiKey: openRouterApiKey,
+    model: OR_MODEL_FAST,
+    messages: [{ role: 'user', content }],
+    temperature: 0,
+    maxTokens: 2800,
+    label: 'OpenRouter finance'
+  });
+  return orParseJsonFromText(orExtractMessageText(data));
 }

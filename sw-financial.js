@@ -303,9 +303,9 @@ function swAttachScoreBreakdownIfNeeded(unified) {
 
 async function swGetFinancialData(companyName, forceRefresh = false, companyContext = null) {
   const config = await loadConfig();
-  const geminiApiKey = config.geminiApiKey;
-  if (!geminiApiKey) {
-    throw new Error('Configure la clé API Gemini dans la popup pour les indicateurs financiers.');
+  const openRouterApiKey = orResolveApiKey(config);
+  if (!openRouterApiKey) {
+    throw new Error('Configure la clé API OpenRouter dans la popup pour les indicateurs financiers.');
   }
 
   const cached = await swGetFinancialCache(companyName);
@@ -315,7 +315,7 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
       companySummary = await swEnsureCompanySummaryCached(
         companyName,
         companyContext,
-        geminiApiKey,
+        openRouterApiKey,
         cached
       );
     }
@@ -353,7 +353,7 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
         companySummary = await swEnsureCompanySummaryCached(
           companyName,
           companyContext,
-          geminiApiKey,
+          openRouterApiKey,
           payload
         );
       }
@@ -394,7 +394,8 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
   const pipeline = await self.financialPipeline.runAdaptiveFinancialPipeline(
     companyName,
     {
-      geminiApiKey,
+      openRouterApiKey,
+      geminiApiKey: openRouterApiKey,
       extractFinancialFromCompanyContext,
       extractFinancialWithGemini: null
     },
@@ -423,7 +424,7 @@ async function swGetFinancialData(companyName, forceRefresh = false, companyCont
     companySummary = await swFetchCompanySummary(
       companyName,
       companyContext,
-      geminiApiKey,
+      openRouterApiKey,
       identificationNotes,
       identifiedCompanyName
     );

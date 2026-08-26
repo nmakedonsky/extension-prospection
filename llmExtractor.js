@@ -79,9 +79,10 @@
   }
 
   async function extractFromWeb(companyName, articles, deps) {
-    const { geminiApiKey, extractFinancialWithGemini } = deps;
-    if (!geminiApiKey || !articles?.length) return null;
-    const raw = await extractFinancialWithGemini(companyName, articles, geminiApiKey);
+    const apiKey = deps.openRouterApiKey || deps.geminiApiKey;
+    const { extractFinancialWithGemini } = deps;
+    if (!apiKey || !articles?.length) return null;
+    const raw = await extractFinancialWithGemini(companyName, articles, apiKey);
     return {
       financials: normalizeLlmFinancials(raw),
       signals: normalizeLlmSignals(raw),
@@ -91,9 +92,10 @@
   }
 
   async function extractFromCompanyContext(companyName, companyContext, deps) {
-    const { geminiApiKey, extractFinancialFromCompanyContext } = deps;
-    if (!geminiApiKey || !extractFinancialFromCompanyContext) return null;
-    const raw = await extractFinancialFromCompanyContext(companyName, companyContext || {}, geminiApiKey);
+    const apiKey = deps.openRouterApiKey || deps.geminiApiKey;
+    const { extractFinancialFromCompanyContext } = deps;
+    if (!apiKey || !extractFinancialFromCompanyContext) return null;
+    const raw = await extractFinancialFromCompanyContext(companyName, companyContext || {}, apiKey);
     if (!raw) return null;
     return {
       financials: normalizeLlmFinancials(raw),

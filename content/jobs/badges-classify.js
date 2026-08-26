@@ -70,6 +70,23 @@ function createLegitimacyPastille(info) {
   span.setAttribute('aria-label', `Légitimité: ${info.verdict}`);
   const tip = pnLegitTooltip(info);
   if (tip) span.setAttribute('title', tip);
+  // Évite que le clic sur la pastille ouvre / recycle la carte LinkedIn.
+  span.addEventListener(
+    'click',
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true
+  );
+  span.addEventListener(
+    'mousedown',
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true
+  );
   return span;
 }
 
@@ -120,14 +137,10 @@ function getBadgeHostElement(card) {
 }
 
 /**
- * Badges visibles uniquement après scroll complet de la page courante,
- * ou pendant le workflow classify (déjà déclenché post-scroll, avant markFullyScrolled).
+ * Labels / pastilles : uniquement après scroll bas de CETTE page
+ * (ou pendant le classify qui vient d’être lancé pour cette page).
  */
 function pnCanPaintBadgesNow() {
-  // Pendant le scrape : toujours autoriser le re-peinture (LinkedIn recycle les cartes).
-  if (typeof openClientJobsSequenceRunning !== 'undefined' && openClientJobsSequenceRunning) {
-    return true;
-  }
   if (typeof jdIsCurrentListFullyScrolled === 'function' && jdIsCurrentListFullyScrolled()) {
     return true;
   }

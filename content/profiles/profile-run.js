@@ -226,17 +226,33 @@
 
     if (!fields.linkedin_url) return;
 
+    // Toujours un JSON (DOM riche ± Voyager) pour enrichissement ultérieur
     const profileJson =
-      captures.length && typeof pnBuildProfileSnapshot === 'function'
+      typeof pnBuildProfileSnapshot === 'function'
         ? pnBuildProfileSnapshot(captures, pageUrl)
         : null;
+
+    const jsonScore = profileJson
+      ? Math.min(
+          9,
+          Math.floor(
+            (JSON.stringify(profileJson).length +
+              (profileJson.about ? 2000 : 0) +
+              ((profileJson.experience || []).length || 0) * 400) /
+              8000
+          )
+        )
+      : 0;
 
     const richness = [
       fields.full_name ? 'n' : '',
       fields.job_title ? 't' : '',
       fields.company_name ? 'c' : '',
       fields.location ? 'l' : '',
-      profileJson ? `j${captures.length}` : ''
+      profileJson?.about ? 'a' : '',
+      (profileJson?.experience || []).length ? `e${Math.min(9, profileJson.experience.length)}` : '',
+      jsonScore ? `j${jsonScore}` : '',
+      captures.length ? `v${Math.min(9, captures.length)}` : ''
     ].join('');
 
     const key = `${fields.linkedin_url}|${richness}`;

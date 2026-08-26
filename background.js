@@ -7,6 +7,7 @@ importScripts(
   'scoring.js',
   'llmExtractor.js',
   'financialPipeline.js',
+  'sw-openrouter.js',
   'sw-company-match-prompt.js',
   'financial-gemini-context.js',
   'sw-company-summary.js',
@@ -67,11 +68,6 @@ async function maybeRotateJdDebugLogs(supabaseUrl, supabaseKey, eventName) {
     } catch (_) {}
   }
 }
-
-/** Modèle unique classification (Google AI `generativelanguage` v1beta). */
-const GEMINI_MODEL_ID = 'gemini-2.5-flash-lite';
-const GEMINI_TRANSIENT_MAX_RETRIES = 1;
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
 /** @type {Map<string, Promise<'Client'|'SS2I'|null>>} */
 const inflightClassify = new Map();
@@ -189,22 +185,6 @@ async function loadConfig() {
   return merged;
 }
 
-/**
- * Liste les modèles disponibles (vérifie la clé Gemini).
- */
-async function testGemini(apiKey) {
-  const key = String(apiKey || '').trim();
-  if (!key) {
-    return { ok: false, error: 'Clé API Gemini manquante.' };
-  }
-  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`;
-  const res = await fetch(url);
-  const text = await res.text();
-  if (!res.ok) {
-    return { ok: false, error: text.slice(0, 500) || `HTTP ${res.status}` };
-  }
-  return { ok: true };
-}
 
 /**
  * Appelle l’endpoint REST racine (OpenAPI) — vérifie URL + clé anon.
@@ -300,19 +280,13 @@ async function testSendPilot(apiKey) {
   return { ok: true, meta: count != null ? { campaignsHint: count } : undefined };
 }
 
-async function getGeminiApiKey() {
-  const c = await loadConfig();
-  const k = String(c.geminiApiKey || '').trim();
-  return k || null;
-}
-
 /**
- * Interprète la sortie Gemini sans utiliser includes('client'), qui fausse la classe
+ * Interprète la sortie LLM sans utiliser includes('client'), qui fausse la classe
  * dès qu'une phrase contient le mot « client » (ex. « clients finaux », « relation client »).
  * @param {string} raw
  * @returns {'Client'|'SS2I'|null}
  */
-function parseGeminiClassificationLabel(raw) {
+function parseClassificationLabel(raw) {
   const lines = String(raw || '')
     .replace(/\r/g, '')
     .split('\n')
@@ -337,10 +311,10 @@ function parseGeminiClassificationLabel(raw) {
  * @param {string} companyName
  * @returns {Promise<'Client'|'SS2I'>}
  */
-async function classifyCompanyWithGemini(companyName) {
-  const apiKey = await getGeminiApiKey();
+async function classifyCompanyWithLlm(companyName) {
+  const apiKey = await getOpenRouterApiKey();
   if (!apiKey) {
-    throw new Error('Clé API Gemini non configurée.');
+    throw new Error('Clé API OpenRouter non configurée.');
   }
 
   const prompt = `Tu classifie les entreprises pour de la prospection commerciale (France / international).
@@ -354,52 +328,21 @@ Attention aux homonymes de raison sociale : privilégie le profil le plus probab
 
 Entreprise : "${String(companyName || '').replace(/"/g, '\\"')}"`;
 
-  const requestBody = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0, maxOutputTokens: 16 }
-  };
-
-  const url = `${GEMINI_BASE}/${GEMINI_MODEL_ID}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  let lastError = null;
-  for (let attempt = 0; attempt <= GEMINI_TRANSIENT_MAX_RETRIES; attempt++) {
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-      const text = await response.text();
-      if (!response.ok) {
-        lastError = new Error(`Gemini ${GEMINI_MODEL_ID} ${response.status}: ${text.slice(0, 200)}`);
-        const transient = response.status === 429 || response.status === 500 || response.status === 503;
-        if (transient && attempt < GEMINI_TRANSIENT_MAX_RETRIES) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-          continue;
-        }
-        throw lastError;
-      }
-      const data = JSON.parse(text);
-      const out = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!out) {
-        throw new Error(`Réponse vide (${GEMINI_MODEL_ID})`);
-      }
-      const parsed = parseGeminiClassificationLabel(out);
-      if (parsed) return parsed;
-      return 'SS2I';
-    } catch (err) {
-      lastError = err;
-      const msg = String(err?.message || err);
-      const m = /\bgemini-[\w.-]+\s+(\d{3})\b/.exec(msg);
-      const status = m ? Number(m[1]) : null;
-      const transient = status === 429 || status === 500 || status === 503;
-      if (transient && attempt < GEMINI_TRANSIENT_MAX_RETRIES) {
-        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-        continue;
-      }
-      throw err;
-    }
+  const data = await orChatCompletion({
+    apiKey,
+    model: OR_MODEL_FAST,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0,
+    maxTokens: 16,
+    label: 'OpenRouter classify'
+  });
+  const out = orExtractMessageText(data);
+  if (!out) {
+    throw new Error(`Réponse vide (${OR_MODEL_FAST})`);
   }
-  throw lastError || new Error(`Gemini ${GEMINI_MODEL_ID} a échoué`);
+  const parsed = parseClassificationLabel(out);
+  if (parsed) return parsed;
+  return 'SS2I';
 }
 
 function quoteSupabaseInValue(value) {
@@ -507,22 +450,22 @@ async function upsertCompanyToSupabase(companyName, type) {
 }
 
 /**
- * Gemini + upsert Supabase (une société).
+ * OpenRouter + upsert Supabase (une société).
  * @param {string} trimmed
  * @returns {Promise<'Client'|'SS2I'|null>}
  */
-async function classifyWithGeminiAndPersist(trimmed) {
+async function classifyWithLlmAndPersist(trimmed) {
   if (inflightClassify.has(trimmed)) {
     return inflightClassify.get(trimmed);
   }
 
   const task = (async () => {
     try {
-      const type = await classifyCompanyWithGemini(trimmed);
+      const type = await classifyCompanyWithLlm(trimmed);
       void logToSupabase('company_classified', {
         company_name: trimmed.slice(0, 120),
         type,
-        via: 'gemini'
+        via: 'openrouter'
       });
       await upsertCompanyToSupabase(trimmed, type);
       rememberCompanyTypeInMemory(trimmed, type);
@@ -548,7 +491,7 @@ async function classifyWithGeminiAndPersist(trimmed) {
 }
 
 /**
- * RAM session → Supabase (batch) → Gemini pour les inconnues.
+ * RAM session → Supabase (batch) → OpenRouter pour les inconnues.
  * @param {string} companyName
  * @returns {Promise<'Client'|'SS2I'|null>}
  */
@@ -572,7 +515,7 @@ async function getOrClassifyCompany(companyName) {
     return fromDb;
   }
 
-  return classifyWithGeminiAndPersist(trimmed);
+  return classifyWithLlmAndPersist(trimmed);
 }
 
 /**
@@ -622,20 +565,20 @@ async function classifyCompaniesBatch(companyNames) {
     }
   }
 
-  const needGemini = unique.filter((n) => !typesOut[n]);
-  if (needGemini.length) {
+  const needLlm = unique.filter((n) => !typesOut[n]);
+  if (needLlm.length) {
     const concurrency = 3;
     let nextIdx = 0;
     async function worker() {
       while (true) {
         const idx = nextIdx++;
-        if (idx >= needGemini.length) return;
-        const n = needGemini[idx];
-        const type = await classifyWithGeminiAndPersist(n);
+        if (idx >= needLlm.length) return;
+        const n = needLlm[idx];
+        const type = await classifyWithLlmAndPersist(n);
         if (type) typesOut[n] = type;
       }
     }
-    const nWorkers = Math.min(concurrency, needGemini.length);
+    const nWorkers = Math.min(concurrency, needLlm.length);
     await Promise.all(Array.from({ length: nWorkers }, () => worker()));
   }
 
@@ -812,6 +755,20 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  try {
+    return pnHandleRuntimeMessage(msg, sender, sendResponse);
+  } catch (e) {
+    try {
+      sendResponse({
+        ok: false,
+        error: String(e && e.message ? e.message : e)
+      });
+    } catch (_) {}
+    return false;
+  }
+});
+
+function pnHandleRuntimeMessage(msg, sender, sendResponse) {
   if (!msg || typeof msg !== 'object') {
     return false;
   }
@@ -846,8 +803,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.type === 'TEST_GEMINI') {
-    testGemini(msg.apiKey)
+  if (msg.type === 'TEST_OPENROUTER' || msg.type === 'TEST_GEMINI') {
+    const run =
+      typeof testOpenRouter === 'function'
+        ? testOpenRouter(msg.apiKey)
+        : Promise.reject(new Error('OpenRouter non chargé — recharge l’extension'));
+    run
       .then((r) => sendResponse(r))
       .catch((e) => sendResponse({ ok: false, error: String(e && e.message ? e.message : e) }));
     return true;
@@ -914,6 +875,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               created: !!(r && r.created),
               id: r?.id || null,
               has_json: payload.linkedin_profile_json != null,
+              stripped_json: !!(r && r.stripped_json),
               error: r?.error || null,
               detail: r?.detail || null,
               capture_from: payload.capture_from || null
@@ -964,7 +926,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     hbPayload.tabId = sender?.tab?.id ?? null;
     if (pnBufferExtensionLogForTab(sender?.tab?.id, sender?.tab?.url, 'jobs_page_heartbeat', hbPayload, 'info')) {
       sendResponse({ ok: true, buffered: true });
-      return true;
+      return false;
     }
     postExtensionLog('jobs_page_heartbeat', hbPayload)
       .then((r) => {
@@ -1088,7 +1050,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const tabUrl = sender?.tab?.url;
     if (pnBufferTouchJobIdsForTab(tabId, tabUrl, ids)) {
       sendResponse({ ok: true, buffered: true });
-      return true;
+      return false;
     }
     swTouchSavedJobsLastSeenAt(ids)
       .then((result) => sendResponse({ ok: true, ...result }))
@@ -1102,7 +1064,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const dedupKey = msg.dedupKey != null ? String(msg.dedupKey) : '';
     if (pnBufferSaveJobOfferForTab(tabId, tabUrl, msg.jobOffer || null, dedupKey)) {
       sendResponse({ ok: true, buffered: true });
-      return true;
+      return false;
     }
     swSaveJobOffer(msg.jobOffer || null)
       .then((result) => sendResponse({ ok: true, ...result }))
@@ -1129,7 +1091,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   return false;
-});
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   void pnFlushTabBuffer(tabId);

@@ -8,7 +8,7 @@
  *   node scripts/legitimacy-bench/backfill-companies.mjs --dry-run
  *   node scripts/legitimacy-bench/backfill-companies.mjs --force
  *
- * Clés : local-config.js (geminiApiKey, supabaseUrl, supabaseAnonKey) ou env.
+ * Clés : local-config.js (openRouterApiKey, supabaseUrl, supabaseAnonKey) ou env OPENROUTER_API_KEY.
  */
 import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -150,8 +150,8 @@ async function main() {
   if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) {
     throw new Error('supabaseUrl / supabaseAnonKey manquants (local-config.js)');
   }
-  if (!cfg.geminiApiKey && !dryRun) {
-    throw new Error('geminiApiKey manquant');
+  if (!cfg.openRouterApiKey && !dryRun) {
+    throw new Error('openRouterApiKey manquant (local-config.js ou OPENROUTER_API_KEY)');
   }
 
   process.stderr.write('Chargement des cibles (saved_jobs ∩ companies)…\n');
@@ -200,7 +200,7 @@ async function main() {
         continue;
       }
 
-      const { parsed, searchQueries, model } = await callGemini(cfg.geminiApiKey, companyCase);
+      const { parsed, searchQueries, model } = await callGemini(cfg.openRouterApiKey, companyCase);
       const verdict = normalizeVerdict(parsed.verdict);
       if (!verdict) throw new Error(`Verdict invalide: ${parsed.verdict}`);
 

@@ -539,7 +539,7 @@ function jdLooksLikeGeographicLocation(s) {
   }
   const low = t.toLowerCase();
   if (
-    /,|\(|\)|\b(région|metropolitan|county|area|remote|télétravail|hybrid|hybride|on-?site|sur\s+site|worldwide|europe|france|germany|uk|usa|canada|spain|italy|belgium|switzerland|india|china|japan|brazil|mexico|australia)\b/i.test(
+    /,|\(|\)|\b(région|metropolitan|county|area|remote|télétravail|hybrid|hybride|on-?site|sur\s+site|worldwide|europe|france|allemagne|germany|deutschland|uk|usa|canada|spain|espagne|italy|italie|belgium|belgique|switzerland|suisse|luxembourg|netherlands|pays-bas|austria|autriche|portugal|poland|pologne|ireland|inde|india|china|japan|brazil|mexico|australia)\b/i.test(
       t
     )
   )
@@ -563,10 +563,48 @@ function jdLooksLikeGeographicLocation(s) {
 }
 
 /**
- * Lieu depuis la ligne primaire / tertiaire du top card (souvent « … · Paris, France »).
+ * Lieu depuis la ligne sous le titre (« France · il y a 1 mois · … »).
+ * UI récente LinkedIn : classes hashées — fallback scan <p>/<span> dans le panneau.
  */
+function jdLooksLikeJobTitleNotLocation(s) {
+  const t = pnNormalizeText(s);
+  if (!t) return false;
+  if (t.length > 70) return true;
+  return /\b(architect|engineer|developer|manager|consultant|lead|director|analyst|scientist|designer|recruiter|responsable|ingénieur|développeur|chef de|solution architect|data engineer)\b/i.test(
+    t
+  );
+}
+
 function jdExtractLocationFromTopCardLines(detailsPanel) {
   if (!detailsPanel?.querySelector) return '';
+
+  const pickFromRaw = (raw) => {
+    const t = pnNormalizeText(raw);
+    if (!t || t.length > 220) return '';
+    const segments = t
+      .split(/[·|•]/)
+      .map((p) => pnNormalizeText(p))
+      .filter(Boolean);
+    for (const seg of segments) {
+      if (jdIsJobMetadataNoise(seg)) continue;
+      if (jdLooksLikeJobTitleNotLocation(seg)) continue;
+      // « Paris (À distance) » / « France (Remote) » → garder la partie géo
+      const bare = pnNormalizeText(
+        seg.replace(/\((?:à distance|remote|hybride|hybrid|sur site|on[-\s]?site)\)/i, '')
+      );
+      if (
+        bare &&
+        !jdIsJobMetadataNoise(bare) &&
+        !jdLooksLikeJobTitleNotLocation(bare) &&
+        jdLooksLikeGeographicLocation(bare)
+      ) {
+        return bare;
+      }
+      if (jdLooksLikeGeographicLocation(seg)) return seg;
+    }
+    return '';
+  };
+
   for (const sel of JOB_DETAIL_LOCATION_LINE_SELECTORS) {
     let el;
     try {
@@ -574,16 +612,126 @@ function jdExtractLocationFromTopCardLines(detailsPanel) {
     } catch (_) {
       el = null;
     }
-    const raw = pnNormalizeText(el?.innerText || el?.textContent || '');
-    if (!raw) continue;
-    const segments = raw
-      .split(/[·|]/)
-      .map((p) => pnNormalizeText(p))
-      .filter(Boolean);
-    for (const seg of segments) {
-      if (jdLooksLikeGeographicLocation(seg)) return seg;
+    const hit = pickFromRaw(el?.innerText || el?.textContent || '');
+    if (hit) return hit;
+  }
+
+  // Nouvelle UI (classes hashées) : privilégier <p> « France · il y a … »
+  const scanNodes = (selector, maxChildren) => {
+    let best = '';
+    try {
+      for (const el of detailsPanel.querySelectorAll(selector)) {
+        if (maxChildren != null && el.children && el.children.length > maxChildren) continue;
+        let t = '';
+        try {
+          t = pnNormalizeText(el.innerText || el.textContent || '');
+        } catch (_) {
+          continue;
+        }
+        if (!t || t.length < 3 || t.length > 160) continue;
+        const hasDot = /[·|•]/.test(t);
+        const hasMeta =
+          /\bil y a\b|\bposted\b|\bcandidat|\bapplicant|\bcliqué sur postuler|\bpeople clicked\b/i.test(t);
+        if (hasDot && !hasMeta) continue;
+        if (
+          !hasDot &&
+          !/^(france|germany|deutschland|switzerland|suisse|belgium|belgique|luxembourg|spain|españa|italy|italia|netherlands|pays-bas|united kingdom|\buk\b|usa|united states|canada|austria|österreich|portugal|poland|ireland|europe|paris|lyon|berlin|munich|amsterdam|bruxelles|geneva|genève|zurich)\b/i.test(
+            t
+          )
+        ) {
+          continue;
+        }
+        try {
+          const r = el.getBoundingClientRect?.();
+          const pr = detailsPanel.getBoundingClientRect?.();
+          if (r && pr && r.top - pr.top > 420) continue;
+        } catch (_) {}
+        const hit = pickFromRaw(t);
+        if (!hit) continue;
+        if (hasDot && hasMeta) return hit;
+        if (!best) best = hit;
+      }
+    } catch (_) {}
+    return best;
+  };
+
+  return scanNodes('p', 14) || scanNodes('span', 2) || scanNodes('div', 8) || '';
+}
+
+function segmentsLikelyGeoFirst(raw) {
+  const first = pnNormalizeText(String(raw || '').split(/[·|•]/)[0] || '');
+  return !!(
+    first &&
+    !jdIsJobMetadataNoise(first) &&
+    !jdLooksLikeJobTitleNotLocation(first) &&
+    jdLooksLikeGeographicLocation(first)
+  );
+}
+
+/**
+ * Top card colonne droite (titre + « Allemagne · il y a … ») — souvent hors du
+ * panneau « À propos » scoré par getJobDetailsPanel.
+ */
+function jdFindJobsTopCardScope() {
+  try {
+    const vw = window.innerWidth || 1200;
+    const dockActive = document.documentElement.classList.contains('lph-financial-dock-active');
+    const leftFloor = dockActive ? vw * 0.35 : vw * 0.28;
+    const metas = [];
+    for (const el of document.querySelectorAll('p')) {
+      const t = pnNormalizeText(el.innerText || el.textContent || '');
+      if (!t || t.length > 180 || !/[·|•]/.test(t)) continue;
+      if (!/\bil y a\b|\bposted\b|\bcliqué sur postuler|\bpeople clicked\b|\bcandidat|\bapplicant/i.test(t)) {
+        continue;
+      }
+      let r;
+      try {
+        r = el.getBoundingClientRect();
+      } catch (_) {
+        continue;
+      }
+      if (!r || r.width < 80) continue;
+      // Colonne détail (pas la liste gauche)
+      if (r.left < leftFloor * 0.9) continue;
+      if (r.top < 40 || r.top > (window.innerHeight || 900) * 0.75) continue;
+      metas.push({ el, top: r.top, left: r.left });
     }
-    if (jdLooksLikeGeographicLocation(raw)) return raw;
+    if (!metas.length) return null;
+    metas.sort((a, b) => a.top - b.top || a.left - b.left);
+    const metaP = metas[0].el;
+    let cur = metaP.parentElement;
+    let best = metaP;
+    for (let i = 0; i < 8 && cur && cur !== document.body; i++) {
+      try {
+        const r = cur.getBoundingClientRect();
+        if (r.width >= 360 && r.height >= 60 && r.height <= 560 && r.left >= leftFloor * 0.85) {
+          best = cur;
+        }
+      } catch (_) {}
+      cur = cur.parentElement;
+    }
+    return best;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Lieu top-card : panneau détail, sinon scope top card colonne droite. */
+function jdExtractJobLocationPreferred(detailsPanel, cardLocation) {
+  const fromPanel = jdExtractLocationFromTopCardLines(detailsPanel);
+  if (fromPanel) return fromPanel;
+  const topScope = jdFindJobsTopCardScope();
+  if (topScope && topScope !== detailsPanel) {
+    const fromTop = jdExtractLocationFromTopCardLines(topScope);
+    if (fromTop) return fromTop;
+  }
+  const cardLoc = pnNormalizeText(cardLocation || '');
+  if (cardLoc && jdLooksLikeGeographicLocation(cardLoc) && !jdIsJobMetadataNoise(cardLoc) && !jdLooksLikeJobTitleNotLocation(cardLoc)) {
+    const bare = pnNormalizeText(
+      cardLoc.replace(/\((?:à distance|remote|hybride|hybrid|sur site|on[-\s]?site)\)/i, '')
+    );
+    if (bare && jdLooksLikeGeographicLocation(bare) && !jdLooksLikeJobTitleNotLocation(bare)) return bare;
+    return cardLoc;
   }
   return '';
 }
@@ -591,10 +739,8 @@ function jdExtractLocationFromTopCardLines(detailsPanel) {
 function pickJobLocationFromInsightTexts(metadataItems) {
   const list = (metadataItems || []).map((x) => pnNormalizeText(x)).filter(Boolean);
   for (const t of list) {
-    if (!jdIsJobMetadataNoise(t) && jdLooksLikeGeographicLocation(t)) return t;
-  }
-  for (const t of list) {
-    if (!jdIsJobMetadataNoise(t)) return t;
+    if (jdIsJobMetadataNoise(t) || jdLooksLikeJobTitleNotLocation(t)) continue;
+    if (jdLooksLikeGeographicLocation(t)) return t;
   }
   return '';
 }
@@ -649,6 +795,23 @@ function jdCollectJobdeskSignalTexts(panel, metadataItems = []) {
       if (!raw) continue;
       push(raw);
       for (const seg of raw.split(/[·|•]/)) push(seg);
+    }
+  } catch (_) {}
+
+  // UI hashée : réutiliser l’extracteur de lieu + pousser les segments méta
+  try {
+    const loc = jdExtractLocationFromTopCardLines(panel);
+    if (loc) push(loc);
+  } catch (_) {}
+
+  try {
+    for (const el of panel.querySelectorAll('p')) {
+      const raw = pnNormalizeText(el.innerText || el.textContent || '');
+      if (!raw || raw.length > 180 || !/[·|•]/.test(raw)) continue;
+      if (!/\bil y a\b|\bposted\b|\bcandidat|\bapplicant|\bcliqué sur postuler/i.test(raw)) continue;
+      push(raw);
+      for (const seg of raw.split(/[·|•]/)) push(seg);
+      break;
     }
   } catch (_) {}
 
@@ -1364,11 +1527,8 @@ function buildJobDetailsPayload(wrapper) {
     }
   }
   const metadataItems = getAllTexts(detailsPanel, JOB_METADATA_ITEM_SELECTORS);
-  const fromTopCard = jdExtractLocationFromTopCardLines(detailsPanel);
-  const cardLoc = pnNormalizeText(cardPayload.location || '');
-  const preferredLoc =
-    (fromTopCard && !jdIsJobMetadataNoise(fromTopCard) ? fromTopCard : '') ||
-    (cardLoc && jdLooksLikeGeographicLocation(cardLoc) && !jdIsJobMetadataNoise(cardLoc) ? cardLoc : '');
+  const fromTopCard = jdExtractJobLocationPreferred(detailsPanel, cardPayload.location);
+  const preferredLoc = fromTopCard && !jdIsJobMetadataNoise(fromTopCard) ? fromTopCard : '';
   const { location, details } = splitJobMetadata(metadataItems, preferredLoc);
   const filters = jdExtractJobdeskFilterFields(detailsPanel, metadataItems);
   // Workplace parfois collé au lieu (« Paris (Hybride) ») si chip absente.
@@ -2218,14 +2378,26 @@ function attachUserClickJobdeskScrape() {
       // et relance un scrape concurrent qui annule celui déjà en cours → mitraillage de toutes
       // les offres en quelques secondes sans jamais laisser le temps à la description de charger.
       if (event.isTrusted === false) return;
+      // Clic pastille légitimité : tooltip only, pas de navigation / scrape.
+      if (event.target?.closest?.('.pn-legit')) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       const wrapper = getJobCardWrapperFromEventTarget(event.target);
       if (!wrapper) return;
-      // Ne pas lutter avec le clic utilisateur : stop auto-open + scrape passif différé.
       try {
         if (typeof jdAbortAutoOpenForUserNavigation === 'function') {
           jdAbortAutoOpenForUserNavigation('user-click');
         }
       } catch (_) {}
+      if (typeof window.pnRepaintVisibleBadgesFromCache === 'function') {
+        setTimeout(() => {
+          try {
+            window.pnRepaintVisibleBadgesFromCache();
+          } catch (_) {}
+        }, 200);
+      }
       void scheduleJobOfferScrapeCancellable(wrapper, {
         o: 'u',
         requireCompanyInsight: false,

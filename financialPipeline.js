@@ -55,9 +55,9 @@
         companyContext: context || null,
         llm: llm?.raw || null,
         debug: {
-          llmAttempted: !!deps?.geminiApiKey,
+          llmAttempted: !!(deps?.openRouterApiKey || deps?.geminiApiKey),
           llmError,
-          pipeline: 'gemini_context_only'
+          pipeline: 'openrouter_context_only'
         }
       }
     };

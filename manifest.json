@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Prospection",
-  "version": "0.5.63",
+  "version": "0.5.73",
   "description": "LinkedIn Jobs (Client+SS2I) + profils /in/ → Supabase, badges, HubSpot / SendPilot en option.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [
     "https://www.linkedin.com/*",
     "https://*.linkedin.com/*",
-    "https://generativelanguage.googleapis.com/*",
+    "https://openrouter.ai/*",
     "https://*.supabase.co/*",
     "https://api.hubapi.com/*",
     "https://api-eu1.hubapi.com/*",

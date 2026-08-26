@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Banc d'essai légitimité employeur (Gemini + Google Search).
+ * Banc d'essai légitimité employeur (OpenRouter + plugin web).
  *
  *   node scripts/legitimacy-bench/run.mjs
  *   node scripts/legitimacy-bench/run.mjs --only hopper,hays,yoit
  *
- * Clé : GEMINI_API_KEY ou geminiApiKey dans local-config.js (non commité).
+ * Clé : OPENROUTER_API_KEY ou openRouterApiKey dans local-config.js (non commité).
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

@@ -33,8 +33,8 @@ function buildFinancialProvidersFromEntry(entry) {
   return {
     _schema_version: FINANCIAL_PROVIDERS_SCHEMA_VERSION,
     gemini_financial_extraction: {
-      provider_id: 'google_gemini',
-      label: 'Gemini (extraction financière)',
+      provider_id: 'openrouter',
+      label: 'OpenRouter (extraction financière)',
       fetched_at: ts,
       status: llmOk ? 'ok' : 'skipped',
       data: raw.llmExtraction || null
